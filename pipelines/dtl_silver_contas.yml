@@ -1,0 +1,52 @@
+# pipelines/dlt_silver_contas.yaml
+engine: "dlt"
+pipeline_type: "silver"
+pipeline_name: "dlt_silver_contas"
+description: "Ingere dados de contas de forma incremental usando DLT, aplicando qualidade e padronização."
+
+source:
+  format: "cloud_files" # Formato específico para DLT ler de forma incremental
+  path: "/mnt/raw/contas/contas_*.csv"
+  options:
+    header: "true"
+    cloudFiles.format: "csv"
+
+sink:
+  schema: "silver" # No DLT, o catálogo/schema de destino é definido na UI do pipeline
+  table: "contas"
+
+columns:
+  - name: "account_id"
+    rename: "id_conta"
+    type: "long"
+    description: "Identificador único da conta."
+    validate:
+      - "not_null"
+
+  - name: "customer_id"
+    rename: "id_cliente"
+    type: "long"
+    description: "Identificador do cliente associado."
+    validate:
+      - "not_null"
+
+  - name: "account_type"
+    rename: "tipo_conta"
+    type: "string"
+    description: "Tipo da conta (ex: Corrente, Poupança)."
+    transform: "UPPER(TRIM(account_type))"
+    validate:
+      - "isin:['CORRENTE', 'POUPANCA']"
+
+  - name: "balance"
+    rename: "saldo"
+    type: "decimal(18, 2)"
+    description: "Saldo atual da conta."
+    validate:
+      - "greater_than_or_equal_to:0"
+
+  - name: "open_date"
+    rename: "data_abertura"
+    type: "date"
+    format: "yyyy-MM-dd"
+    description: "Data de abertura da conta."

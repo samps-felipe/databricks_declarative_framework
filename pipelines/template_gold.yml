@@ -1,0 +1,45 @@
+# pipelines/gold_clientes_enriquecidos.yaml
+pipeline_type: "gold"
+pipeline_name: "gold_clientes_enriquecidos"
+description: "Cria uma visão de clientes 360, juntando dados de clientes e contas."
+
+# Tabelas da camada Silver das quais este pipeline depende
+dependencies:
+  - "dev.silver.clientes"
+  - "dev.silver.contas"
+
+# Destino da tabela Gold
+sink:
+  catalog: "dev"
+  schema: "gold"
+  table: "clientes_enriquecidos"
+  mode: "overwrite"
+
+# Lógica de transformação principal. Pode ser SQL ou um path para um script Python.
+transformation:
+  type: "sql" # ou 'python_file'
+  sql: |
+    SELECT
+      c.id_cliente,
+      c.nome_completo,
+      c.email,
+      c.data_cadastro,
+      COUNT(a.id_conta) AS quantidade_contas,
+      SUM(a.saldo) AS saldo_total_consolidado,
+      MAX(a.data_abertura) AS data_ultima_conta,
+      current_timestamp() as data_atualizacao
+    FROM dev.silver.clientes c
+    LEFT JOIN dev.silver.contas a ON c.id_cliente = a.id_cliente
+    GROUP BY
+      c.id_cliente,
+      c.nome_completo,
+      c.email,
+      c.data_cadastro
+
+# Definição opcional de colunas para adicionar comentários e garantir o schema
+columns:
+  - name: "id_cliente"
+    description: "ID do cliente."
+    pk: true
+  - name: "saldo_total_consolidado"
+    description: "Soma dos saldos de todas as contas do cliente."

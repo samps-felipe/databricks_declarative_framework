@@ -1,0 +1,67 @@
+# pipelines/silver_contas.yaml
+pipeline_type: "silver"
+pipeline_name: "silver_contas"
+description: "Ingere dados de contas de um diretório, aplica qualidade e padronização."
+
+# Configuração da fonte, agora com suporte ao Auto Loader para processamento incremental
+source:
+  format: "cloudFiles" # Usando Auto Loader do Databricks
+  options:
+    cloudFiles.format: "csv"
+    cloudFiles.schemaLocation: "/mnt/schemas/silver_contas" # Local para inferência e evolução de schema
+    header: "true"
+  path: "temp/nome_pasta/contas_*/*.csv" # Padrão de caminho para os arquivos
+
+# Destino dos dados processados
+sink:
+  catalog: "dev"
+  schema: "silver"
+  table: "contas"
+  mode: "append" # Geralmente 'append' para dados incrementais
+  zorder_by: ["id_conta"] # Opcional: otimização de performance
+
+# Definição detalhada das colunas e transformações
+columns:
+  - name: "account_id"
+    rename: "id_conta"
+    type: "long"
+    description: "Identificador único da conta."
+    pk: true # Indica que é parte da chave primária
+    validate:
+      - "not_null"
+
+  - name: "customer_id"
+    rename: "id_cliente"
+    type: "long"
+    description: "Identificador do cliente associado."
+    validate:
+      - "not_null"
+
+  - name: "account_type"
+    rename: "tipo_conta"
+    type: "string"
+    description: "Tipo da conta (ex: Corrente, Poupança)."
+    transform: "UPPER(TRIM(account_type))" # Aplica transformações SQL
+    validate:
+      - "isin:['CORRENTE', 'POUPANCA']" # Valida se o valor está em uma lista
+
+  - name: "balance"
+    rename: "saldo"
+    type: "decimal(18, 2)"
+    description: "Saldo atual da conta."
+    validate:
+      - "greater_than_or_equal_to:0" # Validação de intervalo
+
+  - name: "open_date"
+    rename: "data_abertura"
+    type: "date"
+    format: "yyyy-MM-dd" # Formato original para parsing correto
+    description: "Data de abertura da conta."
+
+# Configuração de agendamento (informativo, para ser usado pelo Databricks Jobs)
+schedule:
+  type: "triggered" # 'triggered' ou 'cron'
+  cron_expression: "0 0 5 * * ?" # Exemplo: todo dia às 5h da manhã
+
+# Opcional: permite usar um notebook customizado em vez do motor padrão
+custom_script_override: "" # Ex: "/Repos/seu_usuario/custom_scripts/processa_contas.py"

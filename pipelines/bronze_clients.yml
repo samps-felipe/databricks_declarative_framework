@@ -1,0 +1,76 @@
+# Descrição geral do pipeline
+pipeline_name: "bronze_clientes"
+description: "Ingere dados de clientes de um arquivo CSV, aplica limpeza, tipagem, validações e salva como uma tabela Delta na camada Bronze."
+
+# Definição da fonte dos dados
+source:
+  format: "csv"
+  path: "/mnt/raw/clientes/clientes.csv"
+  options:
+    header: "true"
+    delimiter: ","
+    inferSchema: "false" # Boa prática: defina o schema manualmente para garantir consistência
+
+# Lista sequencial de passos a serem executados
+steps:
+  - step_type: "rename_columns"
+    description: "Renomeia colunas para o padrão da empresa."
+    renames:
+      "customer_id": "id_cliente"
+      "first_name": "primeiro_nome"
+      "last_name": "ultimo_nome"
+      "email": "email"
+      "registration_date": "data_cadastro"
+
+  - step_type: "cast_columns"
+    description: "Aplica a tipagem correta para cada coluna."
+    schema:
+      id_cliente: "integer"
+      primeiro_nome: "string"
+      ultimo_nome: "string"
+      email: "string"
+      data_cadastro: "date"
+      _rescued_data: "string" # Coluna padrão do Spark para dados malformados
+
+  - step_type: "add_columns"
+    description: "Adiciona colunas de metadados para rastreabilidade."
+    columns:
+      # Expressões SQL podem ser usadas aqui
+      nome_completo: "concat(primeiro_nome, ' ', ultimo_nome)"
+      data_ingestao: "current_timestamp()"
+      arquivo_origem: "input_file_name()"
+
+  - step_type: "validate_data"
+    description: "Aplica regras de qualidade de dados."
+    # Ações em caso de falha: 'fail' (para o pipeline), 'drop' (remove a linha), 'log' (apenas avisa)
+    on_fail: "drop"
+    rules:
+      - column: "id_cliente"
+        constraint: "not_null"
+      - column: "email"
+        constraint: "not_null"
+      - column: "email"
+        # Valida se o email segue um padrão regex
+        constraint: "pattern"
+        pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+      - column: "primeiro_nome"
+        # Valida que o nome não contenha números
+        constraint: "pattern"
+        pattern: "^[^0-9]*$"
+
+  - step_type: "select_columns"
+    description: "Seleciona e reordena as colunas finais."
+    columns:
+      - "id_cliente"
+      - "nome_completo"
+      - "email"
+      - "data_cadastro"
+      - "data_ingestao"
+      - "arquivo_origem"
+
+# Definição do destino dos dados processados
+sink:
+  format: "delta"
+  mode: "overwrite" # Pode ser 'append' ou 'overwrite'
+  table_name: "bronze.clientes"
+  partition_by: [] # Opcional: ["coluna1", "coluna2"]
