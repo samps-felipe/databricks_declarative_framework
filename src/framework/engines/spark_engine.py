@@ -10,22 +10,8 @@ import re
 class SparkEngine(BaseEngine):
     def __init__(self, spark: SparkSession):
         self.spark = spark
-    
-    def execute_gold_transformation(self, config: PipelineConfig) -> DataFrame:
-        """Executa uma transformação SQL para um pipeline Gold."""
-        print("  -> Lendo dependências da camada Silver...")
-        for dep in config.dependencies:
-            table_name = dep.split('.')[-1]
-            self.read_table(dep).createOrReplaceTempView(table_name)
-            print(f"  -> Dependência registrada: Tabela '{dep}' como view SQL '{table_name}'")
+   
 
-        transform_config = config.transformation
-        if transform_config.type == 'sql':
-            print("  -> Executando transformação SQL da camada Gold.")
-            return self.spark.sql(transform_config.sql)
-        else:
-            raise NotImplementedError(f"Transformação do tipo '{transform_config.type}' não suportada para Gold.")
-    
     def _table_exists(self, table_name: str) -> bool:
         """Verifica se uma tabela existe no Unity Catalog de forma compatível com serverless."""
         try:
@@ -144,7 +130,6 @@ class SparkEngine(BaseEngine):
             )
         
         # Insere os registros novos/atualizados
-        # --- CORREÇÃO APLICADA AQUI ---
         if final_inserts.count() > 0:
             print(f"Inserindo {final_inserts.count()} registros novos/atualizados...")
             final_inserts.write.format("delta").mode("append").saveAsTable(target_table_name)
@@ -182,79 +167,91 @@ class SparkEngine(BaseEngine):
             .whenMatchedUpdate(set=update_set)
             .whenNotMatchedInsert(values=insert_values)
             .execute())
-        
+    
     def create_table(self, config: PipelineConfig):
-        sink_config = config.sink
-        target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
+        """Cria uma tabela no Unity Catalog com uma lógica unificada para Silver e Gold."""
+        target_table_name = f"{config.sink.catalog}.{config.sink.schema_name}.{config.sink.table}"
         
         if self._table_exists(target_table_name):
             print(f"Tabela '{target_table_name}' já existe. Nenhuma ação será tomada.")
-            return
-
-        print(f"Construindo DDL para a tabela '{target_table_name}'...")
+        else:
+            self._create_unified_table(config)
         
-        ddl = ""
-
-        if config.pipeline_type == 'gold':
-            # Tabelas Gold têm um schema simples definido pela transformação
-            column_definitions = []
-            for spec in config.columns:
-                comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
-                column_definitions.append(f"{spec.name} {spec.type}{comment_str}")
-            
-            ddl = f"CREATE TABLE {target_table_name} ({', '.join(column_definitions)})"
-            if config.description:
-                ddl += f" COMMENT '{config.description}'"
-            if sink_config.partition_by:
-                ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
+        if config.validation_log_table and not self._table_exists(config.validation_log_table):
+            self._create_validation_log_table(config)
+    
+    def _create_unified_table(self, config: PipelineConfig):
+        """Constrói e executa o DDL para qualquer tabela (Silver ou Gold)."""
+        sink_config = config.sink
+        target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
         
-        else: # Lógica para Silver
-            column_definitions = ["id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1) COMMENT 'Chave primária surrogate auto-incrementada.'"]
-            primary_keys = []
-            for spec in config.columns:
-                final_name = self._get_final_column_name(spec, config.defaults)
-                if spec.pk:
-                    primary_keys.append(final_name)
-                is_not_null = any(v.rule == "not_null" for v in spec.validation_rules)
-                not_null_str = " NOT NULL" if is_not_null else ""
-                comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
-                column_definitions.append(f"{final_name} {spec.type}{not_null_str}{comment_str}")
-
-            if config.sink.scd and config.sink.scd.type == '2':
-                column_definitions.extend([
-                    "data_hash STRING COMMENT 'Hash dos dados para detecção de mudanças.'",
-                    "is_current BOOLEAN COMMENT 'Flag que indica se o registro é a versão ativa.'",
-                    "start_date TIMESTAMP COMMENT 'Data de início da validade do registro.'",
-                    "end_date TIMESTAMP COMMENT 'Data de fim da validade do registro.'"
-                ])
-            else:
-                column_definitions.append("created_at TIMESTAMP COMMENT 'Timestamp de criação do registro.'")
+        print(f"Construindo DDL para a tabela '{target_table_name}' (Tipo: {config.pipeline_type})...")
+        
+        column_definitions = ["id BIGINT GENERATED ALWAYS AS IDENTITY COMMENT 'Chave primária surrogate.'"]
+        primary_keys = []
+        
+        for spec in config.columns:
+            final_name = self._get_final_column_name(spec, config.defaults)
+            if spec.pk: primary_keys.append(final_name)
             
+            is_not_null = any(v.rule == "not_null" for v in spec.validation_rules)
+            not_null_str = " NOT NULL" if is_not_null else ""
+            comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
+            column_definitions.append(f"{final_name} {spec.type}{not_null_str}{comment_str}")
+        
+        # Adiciona colunas de controle SCD se configurado
+        if sink_config.scd and sink_config.scd.type == '2':
             column_definitions.extend([
-                "hash_key STRING COMMENT 'Hash das chaves primárias.'",
-                "updated_at TIMESTAMP COMMENT 'Timestamp da última atualização.'"
+                "data_hash STRING COMMENT 'Hash para detecção de mudanças.'",
+                "is_current BOOLEAN COMMENT 'Flag de registro ativo.'",
+                "start_date TIMESTAMP COMMENT 'Data de início da validade.'",
+                "end_date TIMESTAMP COMMENT 'Data de fim da validade.'"
             ])
-            
-            pk_constraint = f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY ({', '.join(primary_keys)})" if primary_keys else f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY (id)"
-            ddl = f"CREATE TABLE {target_table_name} ({', '.join(column_definitions)}{pk_constraint})"
-            if config.description:
-                ddl += f" COMMENT '{config.description}'"
-            if sink_config.partition_by:
-                ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
-            
-            # self.spark.sql(ddl)
-            # self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
+        else:
+            column_definitions.append("created_at TIMESTAMP COMMENT 'Timestamp de criação.'")
+        
+        # Adiciona colunas de controle padrão
+        column_definitions.extend([
+            "hash_key STRING COMMENT 'Hash das chaves primárias.'",
+            "updated_at TIMESTAMP COMMENT 'Timestamp da última atualização.'"
+        ])
+        
+        # Adiciona constraints de Chave Estrangeira (se houver)
+        fk_definitions = []
+        if sink_config.foreign_keys:
+            for fk in sink_config.foreign_keys:
+                fk_definitions.append(f"CONSTRAINT {fk.name} FOREIGN KEY ({', '.join(fk.local_columns)}) REFERENCES {fk.references_table}({', '.join(fk.references_columns)})")
+
+        pk_constraint = f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY ({', '.join(primary_keys)})" if primary_keys else f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY (id)"
+        
+        all_definitions = column_definitions + fk_definitions
+        ddl = f"CREATE TABLE {target_table_name} ({', '.join(all_definitions)}{pk_constraint})"
+        
+        if config.description: ddl += f" COMMENT '{config.description}'"
+        if sink_config.partition_by: ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
 
         print("Executando DDL de criação da tabela...")
         self.spark.sql(ddl)
-
-         # Define as propriedades da tabela após a criação, se for Silver
-        if config.pipeline_type == 'silver':
-            primary_keys = [self._get_final_column_name(spec, config.defaults) for spec in config.columns if spec.pk]
-            if primary_keys:
-                self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
-        
+        if primary_keys:
+            self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
         print("Tabela criada com sucesso.")
+
+    def _create_validation_log_table(self, config: PipelineConfig):
+        """Cria a tabela de log de validação com um schema fixo."""
+        print(f"Criando tabela de log de validação: {config.validation_log_table}")
+        log_ddl = f"""
+        CREATE TABLE {config.validation_log_table} (
+            pipeline_name STRING,
+            validation_rule STRING,
+            failed_column STRING,
+            failed_value STRING,
+            log_timestamp TIMESTAMP,
+            primary_keys MAP<STRING, STRING> COMMENT 'Chaves primárias do registro que falhou (coluna: valor).'
+        )
+        """
+        self.spark.sql(log_ddl)
+        print("Tabela de log de validação criada com sucesso.")
+
 
     def update_table(self, config: PipelineConfig):
         """Aplica alterações de schema e metadados a uma tabela existente."""
@@ -341,3 +338,28 @@ class SparkEngine(BaseEngine):
 
         print("\nLinhas no resultado ESPERADO que NÃO estão no ATUAL:")
         df_expected.exceptAll(df_actual).show()
+    
+    def execute_gold_transformation(self, config: PipelineConfig) -> DataFrame:
+        """Executa uma sequência de transformações SQL para um pipeline Gold."""
+        print("  -> Lendo dependências...")
+        for dep in config.dependencies:
+            table_name = dep.split('.')[-1]
+            self.read_table(dep).createOrReplaceTempView(table_name)
+            print(f"  -> Dependência registrada: Tabela '{dep}' como view SQL '{table_name}'")
+
+        df_result = None
+        for i, transform_step in enumerate(config.transformation):
+            step_name = transform_step.name.replace(' ', '_').lower()
+            print(f"  -> Executando passo de transformação Gold {i+1}/{len(config.transformation)}: '{step_name}'")
+            if transform_step.type == 'sql':
+                df_result = self.spark.sql(transform_step.sql)
+                # O resultado de cada passo se torna uma view para o próximo
+                df_result.createOrReplaceTempView(step_name)
+                print(f"    -> View intermediária '{step_name}' criada.")
+            else:
+                raise NotImplementedError(f"Transformação do tipo '{transform_step.type}' não suportada para Gold.")
+        
+        if df_result is None:
+            raise ValueError("Nenhum passo de transformação foi executado para o pipeline Gold.")
+        
+        return df_result

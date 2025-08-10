@@ -4,6 +4,7 @@ from ..steps.reader import ReadStep
 from ..steps.transformer import TransformStep
 from ..steps.validator import ValidateStep
 from ..steps.writer import WriterStep
+from importlib import import_module
 
 class Pipeline:
     def __init__(self, config: PipelineConfig, engine: BaseEngine):
@@ -18,17 +19,38 @@ class Pipeline:
         writer = WriterStep()
 
         df_transformed = None
-        if self.config.pipeline_type == 'silver':
-            df_source = reader.execute(engine=self.engine, config=self.config)
-            df_transformed = transformer.execute(df_source, engine=self.engine, config=self.config)
-        elif self.config.pipeline_type == 'gold':
-            # Para Gold, a transformação lê as dependências e cria o DataFrame
-            df_transformed = transformer.execute(None, engine=self.engine, config=self.config)
-        else:
-            raise ValueError(f"Pipeline type '{self.config.pipeline_type}' não suportado.")
 
-        validated_df, validation_log_df = validator.execute(df_transformed, engine=self.engine, config=self.config)
-        writer.execute(validated_df, engine=self.engine, config=self.config, validation_log_df=validation_log_df)
+        try:
+            if self.config.pipeline_type == 'silver':
+                df_source = reader.execute(engine=self.engine, config=self.config)
+            else: # Gold
+                df_source = None # Gold não lê de arquivos
+        except Exception as e:
+            raise Exception(f"Falha no passo de LEITURA do pipeline '{self.config.pipeline_name}': {e}") from e
+        
+        try:
+            if self.config.custom_transform_script:
+                print(f"Executando script de transformação customizado: {self.config.custom_transform_script}")
+                module_path, func_name = self.config.custom_transform_script.rsplit('.', 1)
+                custom_module = import_module(module_path)
+                custom_transform_func = getattr(custom_module, func_name)
+                df_transformed = custom_transform_func(df_source, self.engine, self.config)
+            else:
+                df_transformed = transformer.execute(df_source, engine=self.engine, config=self.config)
+        except Exception as e:
+            raise Exception(f"Falha no passo de TRANSFORMAÇÃO do pipeline '{self.config.pipeline_name}': {e}") from e
+        
+
+        try:
+            validated_df, validation_log_df = validator.execute(df_transformed, engine=self.engine, config=self.config)
+        except Exception as e:
+            raise Exception(f"Falha no passo de VALIDAÇÃO do pipeline '{self.config.pipeline_name}': {e}") from e
+
+        try:
+            writer.execute(validated_df, engine=self.engine, config=self.config, validation_log_df=validation_log_df)
+        except Exception as e:
+            raise Exception(f"Falha no passo de ESCRITA do pipeline '{self.config.pipeline_name}': {e}") from e
+
         print(f"--- Pipeline {self.config.pipeline_name} concluído com sucesso. ---")
 
 
@@ -67,13 +89,17 @@ class Pipeline:
         print(f"Carregando resultados esperados de: {self.config.test.expected_results_table}")
         df_expected_output = self.engine.read_table(self.config.test.expected_results_table)
 
-        # Compara o resultado atual com o esperado
+        # Remove colunas voláteis (como timestamps) que podem variar a cada execução
+        volatile_cols = ["updated_at", "created_at", "start_date", "end_date", "log_timestamp"]
+        actual_to_compare = df_actual_output.drop(*[c for c in volatile_cols if c in df_actual_output.columns])
+        expected_to_compare = df_expected_output.drop(*[c for c in volatile_cols if c in df_expected_output.columns])
+
         print("Comparando resultado atual com o esperado...")
-        are_equal = self.engine.compare_dataframes(df_actual_output, df_expected_output)
+        are_equal = self.engine.compare_dataframes(actual_to_compare, expected_to_compare)
 
         if are_equal:
             print("TESTE PASSOU: O resultado atual corresponde ao esperado.")
         else:
             print("TESTE FALHOU: O resultado atual é diferente do esperado.")
-            self.engine.show_differences(df_actual_output, df_expected_output)
+            self.engine.show_differences(actual_to_compare, expected_to_compare)
             raise AssertionError("O resultado do teste não corresponde ao esperado.")

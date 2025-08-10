@@ -41,7 +41,7 @@ def main():
         pipeline.create()
     elif command == 'update':
         pipeline.update()
-    elif command == 'test': # <-- Nova lógica para o comando 'test'
+    elif command == 'test':
         pipeline.test()
     else:
         print(f"Comando '{command}' não reconhecido.")

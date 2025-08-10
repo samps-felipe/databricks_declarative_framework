@@ -1,20 +1,44 @@
 from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class ValidationRule(BaseModel):
     rule: str
     on_fail: Literal['fail', 'drop', 'warn'] = 'fail'
 
 class ColumnSpec(BaseModel):
-    name: str
-    rename: Optional[str] = None
+    name: Optional[str] = None
+    rename: str
     type: str
+    is_derived: bool = False
+    optional: bool = False
+    udf: Optional[str] = None
     description: Optional[str] = None
     pk: bool = False
     transform: Optional[str] = None
     validation_rules: List[ValidationRule] = Field([], alias='validate')
     format: Optional[str] = None
     try_cast: bool = False
+
+    @field_validator('name', pre=True, always=True)
+    def check_name_required_if_not_derived(cls, v, values):
+        if not values.get('is_derived') and v is None:
+            raise ValueError("'name' é obrigatório para colunas que não são derivadas.")
+        return v
+    
+    @field_validator('rename')
+    def check_for_reserved_column_names(cls, v):
+        if v.lower() in RESERVED_COLUMN_NAMES:
+            raise ValueError(
+                f"O nome de coluna '{v}' é reservado pelo framework. "
+                f"Por favor, use um nome diferente. Nomes reservados: {RESERVED_COLUMN_NAMES}"
+            )
+        return v
+
+class ForeignKey(BaseModel):
+    name: str
+    local_columns: List[str]
+    references_table: str
+    references_columns: List[str]
 
 class TableValidation(BaseModel):
     type: Literal['duplicate_check']
@@ -43,13 +67,15 @@ class SinkConfig(BaseModel):
     partition_by: Optional[List[str]] = None
     zorder_by: Optional[List[str]] = None
     overwrite_condition: Optional[str] = None
-    scd: Optional[SCDConfig] = None # <-- Adicionada a configuração de SCD
+    scd: Optional[SCDConfig] = None
+    foreign_keys: List[ForeignKey] = []
 
 class TestConfig(BaseModel):
     source_data_path: str = Field(..., description="Caminho para os dados de entrada usados apenas no teste.")
     expected_results_table: str = Field(..., description="Nome completo da tabela que contém os resultados esperados.")
 
 class TransformationConfig(BaseModel):
+    name: str = Field(..., description="Nome do passo de transformação. Será usado para criar uma view temporária com o resultado.")
     type: Literal['sql']
     sql: str
 
@@ -63,7 +89,8 @@ class PipelineConfig(BaseModel):
     source: Optional[SourceConfig] = None
     sink: SinkConfig
     columns: List[ColumnSpec]
-    transformation: Optional[TransformationConfig] = None
+    transformation: Optional[List[TransformationConfig]] = None # Alterado para uma lista
     table_validations: List[TableValidation] = []
     validation_log_table: Optional[str] = None
-    test: Optional[TestConfig] = None # <-- Adicionada a configuração de teste opcional
+    test: Optional[TestConfig] = None
+    custom_transform_script: Optional[str] = None
