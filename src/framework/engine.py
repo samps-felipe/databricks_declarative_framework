@@ -96,13 +96,44 @@ class PipelineEngine:
             print("Lendo com Auto Loader em modo batch (para motor Spark).")
             return self.spark.read.format("csv").options(**source_config['options']).load(source_config['path'])
         
-        return reader.format(source_config['format']).options(**source_config.get('options', {})).load(source_config['path'])
+        # Ignora a verificação para formatos não-delimitados como parquet
+        if source_config['format'] in ['parquet', 'delta']:
+            return self.spark.read.format(source_config['format']).load(source_config['path'])
+        
+         # Leitura do arquivo
+        reader = self.spark.read.format(source_config['format'])
+        if 'options' in source_config:
+            reader.options(**source_config['options'])
+        
+        df = reader.load(source_config['path'])
+
+        # --- VERIFICAÇÃO DO DELIMITADOR ---
+        num_expected_columns = source_config.get('expected_columns')
+        num_actual_columns = len(df.columns)
+
+        if num_expected_columns:
+            # O principal sinal de delimitador incorreto é ter apenas uma coluna
+            if num_actual_columns == 1 and num_expected_columns > 1:
+                delimiter = source_config.get('options', {}).get('delimiter', '[NÃO ESPECIFICADO]')
+                raise ValueError(
+                    f"Verificação de delimitador falhou! O arquivo foi lido com apenas 1 coluna, "
+                    f"mas eram esperadas {num_expected_columns}. "
+                    f"Verifique se o delimitador ('{delimiter}') está correto no arquivo de origem e no YAML."
+                )
+            # Você também pode verificar se o número é exatamente o esperado
+            elif num_actual_columns != num_expected_columns:
+                print(
+                    f"[AVISO] O número de colunas lidas ({num_actual_columns}) é diferente do esperado ({num_expected_columns}). "
+                    f"O pipeline continuará, mas verifique a configuração."
+                )
+
+        return df
 
     def _process_spark(self) -> DataFrame:
         """Orquestra o processamento para o motor Spark."""
         if self.pipeline_type == 'silver':
             df = self._ingest_spark()
-            return steps_handler.handle_silver_transformation(df, self.config['columns'])
+            return steps_handler.handle_silver_transformation(df, self.config)
         elif self.pipeline_type == 'gold':
             return steps_handler.handle_gold_transformation(self.spark, self.config)
         
@@ -123,3 +154,8 @@ class PipelineEngine:
             self.spark.sql(f"OPTIMIZE {target_table} ZORDER BY ({zorder_cols})")
         else:
             writer.saveAsTable(target_table)
+
+if __name__ == "__main__":
+    config_path = "/Workspace/Users/sampaio.motion@gmail.com/databricks_declarative_framework/pipelines/template_silver.yml"
+    engine = PipelineEngine(spark, config_path)
+    engine.run()

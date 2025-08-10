@@ -5,58 +5,63 @@ description: "Ingere dados de contas de um diretório, aplica qualidade e padron
 
 # Configuração da fonte, agora com suporte ao Auto Loader para processamento incremental
 source:
-  format: "cloudFiles" # Usando Auto Loader do Databricks
+  format: "csv" # Usando Auto Loader do Databricks
   options:
-    cloudFiles.format: "csv"
-    cloudFiles.schemaLocation: "/mnt/schemas/silver_contas" # Local para inferência e evolução de schema
     header: "true"
-  path: "temp/nome_pasta/contas_*/*.csv" # Padrão de caminho para os arquivos
+    delimiter: ";"
+  expected_columns: 53 # O número de colunas que o arquivo DEVE ter
+  path: "/Volumes/dev/sch_bronze/testes/TESTE.csv" # Padrão de caminho para os arquivos
+
 
 # Destino dos dados processados
 sink:
   catalog: "dev"
-  schema: "silver"
-  table: "contas"
+  schema: "sch_silver"
+  table: "teste"
   mode: "append" # Geralmente 'append' para dados incrementais
-  zorder_by: ["id_conta"] # Opcional: otimização de performance
+  # zorder_by: ["ColunaA"] # Opcional: otimização de performance
+
+defaults:
+  date_format: "dd/MM/yyyy" # Formato de data padrão para todo o pipeline
+  column_rename_pattern: "snake_case" # Opções: "snake_case" ou "none"
 
 # Definição detalhada das colunas e transformações
 columns:
-  - name: "account_id"
-    rename: "id_conta"
-    type: "long"
-    description: "Identificador único da conta."
+  - name: "ColunaA"
+    rename: "coluna_a"
+    type: "string"
+    description: "Coluna a"
     pk: true # Indica que é parte da chave primária
     validate:
       - "not_null"
 
-  - name: "customer_id"
-    rename: "id_cliente"
-    type: "long"
-    description: "Identificador do cliente associado."
+  - name: "ColunaB"
+    rename: "coluna_b"
+    type: "double"
+    description: "Coluna B"
     validate:
       - "not_null"
 
-  - name: "account_type"
-    rename: "tipo_conta"
-    type: "string"
-    description: "Tipo da conta (ex: Corrente, Poupança)."
-    transform: "UPPER(TRIM(account_type))" # Aplica transformações SQL
-    validate:
-      - "isin:['CORRENTE', 'POUPANCA']" # Valida se o valor está em uma lista
+  # - name: "ColunaC"
+  #   rename: "coluna_c"
+  #   type: "date"
+  #   description: "Coluna C"
+  #   transform: "UPPER(TRIM(ColunaC))" # Aplica transformações SQL
+  #   validate:
+  #     - "isin:['CORRENTE', 'POUPANCA']" # Valida se o valor está em uma lista
 
-  - name: "balance"
-    rename: "saldo"
-    type: "decimal(18, 2)"
-    description: "Saldo atual da conta."
-    validate:
-      - "greater_than_or_equal_to:0" # Validação de intervalo
+  # - name: "balance"
+  #   rename: "saldo"
+  #   type: "decimal(18, 2)"
+  #   description: "Saldo atual da conta."
+  #   validate:
+  #     - "greater_than_or_equal_to:0" # Validação de intervalo
 
-  - name: "open_date"
-    rename: "data_abertura"
+  - name: "ColunaC"
+    rename: "coluna_c"
     type: "date"
-    format: "yyyy-MM-dd" # Formato original para parsing correto
-    description: "Data de abertura da conta."
+    format: "dd/mm/yyy" # Formato original para parsing correto
+    description: "Data Coluna C"
 
 # Configuração de agendamento (informativo, para ser usado pelo Databricks Jobs)
 schedule:
