@@ -1,0 +1,61 @@
+engine: "spark"
+pipeline_type: "silver"
+pipeline_name: "silver_clientes_v2"
+description: "Processa dados de clientes com validações e merge."
+validation_log_table: "dev.logs.validation_failures"
+
+test:
+  source_data_path: "/path/to/test/test_data.csv"
+  expected_results_table: "dev.silver.expected_clientes_test"
+
+defaults:
+  date_format: "yyyy-MM-dd"
+  column_rename_pattern: "snake_case"
+
+source:
+  format: "csv"
+  path: "/path/to/your/data.csv"
+  options:
+    header: "true"
+    delimiter: ";"
+  expected_columns: 4
+
+sink:
+  catalog: "dev"
+  schema: "silver"
+  table: "clientes"
+  mode: "merge"
+  partition_by: ["dt_cadastro"]
+
+columns:
+  - name: "ClientID"
+    rename: "id_cliente"
+    type: "long"
+    description: "Identificador único do cliente."
+    pk: true
+    validate:
+      - rule: "not_null"
+        on_fail: "drop"
+
+  - name: "FullName"
+    type: "string"
+    description: "Nome completo do cliente."
+    transform: "UPPER(FullName)"
+
+  - name: "Email"
+    type: "string"
+    description: "Endereço de e-mail."
+    validate:
+      - rule: "pattern:^([a-zA-Z0-9_\\-\\.]+)@([a-zA-Z0-9_\\-\\.]+)\\.([a-zA-Z]{2,5})$"
+        on_fail: "warn"
+
+  - name: "RegistrationDate"
+    rename: "dt_cadastro"
+    type: "date"
+    description: "Data de cadastro do cliente."
+    try_cast: true # Se a data for malformada, resultará em nulo em vez de erro.
+
+table_validations:
+  - type: "duplicate_check"
+    columns: ["id_cliente"]
+    on_fail: "fail"

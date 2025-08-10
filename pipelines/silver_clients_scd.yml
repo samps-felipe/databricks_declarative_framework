@@ -1,0 +1,35 @@
+engine: "spark"
+pipeline_type: "silver"
+pipeline_name: "silver_clientes_scd2"
+description: "Mantém o histórico de mudanças de endereço dos clientes."
+
+sink:
+  catalog: "dev"
+  schema: "silver"
+  table: "clientes_historico"
+  mode: "merge"
+  scd:
+    type: "2"
+    track_columns: ["endereco", "cidade", "estado"] # Colunas que, se mudarem, geram uma nova versão
+
+columns:
+  - name: "ClientID"
+    rename: "id_cliente"
+    type: "long"
+    pk: true # Chave de negócio para identificar o cliente
+  
+  - name: "FullName"
+    rename: "nome_completo"
+    type: "string"
+
+  - name: "Address"
+    rename: "endereco"
+    type: "string"
+
+  - name: "City"
+    rename: "cidade"
+    type: "string"
+
+  - name: "State"
+    rename: "estado"
+    type: "string"
