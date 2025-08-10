@@ -41,3 +41,8 @@ class BaseEngine(ABC):
     def show_differences(self, df_actual: DataFrame, df_expected: DataFrame):
         """Exibe as diferenças entre dois DataFrames."""
         pass
+
+    @abstractmethod
+    def execute_gold_transformation(self, config: PipelineConfig) -> DataFrame:
+        """Executa a lógica de transformação para um pipeline Gold."""
+        pass

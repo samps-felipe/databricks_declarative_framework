@@ -1,5 +1,6 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StructType, StructField
+from pyspark.sql.functions import col, lit, current_timestamp, expr
 import pyspark.sql.functions as F
 from delta.tables import DeltaTable
 from ..core.engine import BaseEngine
@@ -9,6 +10,34 @@ import re
 class SparkEngine(BaseEngine):
     def __init__(self, spark: SparkSession):
         self.spark = spark
+    
+    def execute_gold_transformation(self, config: PipelineConfig) -> DataFrame:
+        """Executa uma transformação SQL para um pipeline Gold."""
+        print("  -> Lendo dependências da camada Silver...")
+        for dep in config.dependencies:
+            table_name = dep.split('.')[-1]
+            self.read_table(dep).createOrReplaceTempView(table_name)
+            print(f"  -> Dependência registrada: Tabela '{dep}' como view SQL '{table_name}'")
+
+        transform_config = config.transformation
+        if transform_config.type == 'sql':
+            print("  -> Executando transformação SQL da camada Gold.")
+            return self.spark.sql(transform_config.sql)
+        else:
+            raise NotImplementedError(f"Transformação do tipo '{transform_config.type}' não suportada para Gold.")
+    
+    def _table_exists(self, table_name: str) -> bool:
+        """Verifica se uma tabela existe no Unity Catalog de forma compatível com serverless."""
+        try:
+            # Usar DESCRIBE é uma maneira padrão de verificar a existência de uma tabela
+            self.spark.sql(f"DESCRIBE TABLE EXTENDED {table_name}")
+            return True
+        except Exception as e:
+            # O erro para "tabela não encontrada" geralmente contém esta string
+            if "TABLE_OR_VIEW_NOT_FOUND" in str(e).upper():
+                return False
+            # Se for outro erro, lança a exceção
+            raise e
     
     def _get_final_column_name(self, spec, defaults):
         """Helper para obter o nome final da coluna com base nas regras."""
@@ -36,6 +65,8 @@ class SparkEngine(BaseEngine):
 
     def read(self, config: PipelineConfig) -> DataFrame:
         source_config = config.source
+        if not source_config:
+             raise ValueError("Configuração 'source' não encontrada para um pipeline que requer leitura de arquivos.")
         reader = self.spark.read.format(source_config.format)
         reader.options(**source_config.options)
         return reader.load(source_config.path)
@@ -57,7 +88,7 @@ class SparkEngine(BaseEngine):
     
 
     def _merge_scd2(self, df: DataFrame, config: PipelineConfig):
-        """Executa a lógica de merge para Slowly Changing Dimension Tipo 2."""
+        """Executa a lógica de merge para Slowly Changing Dimension Tipo 2 usando a hash_key."""
         sink_config = config.sink
         target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
         
@@ -65,59 +96,58 @@ class SparkEngine(BaseEngine):
         target_table = DeltaTable.forName(self.spark, target_table_name)
         target_df = target_table.toDF().alias("target")
 
-        pk_cols = [spec.rename or spec.name for spec in config.columns if spec.pk]
-        join_condition = " AND ".join([f"source.{pk} = target.{pk}" for pk in pk_cols])
+        join_condition = "source.hash_key = target.hash_key"
 
-        # 1. Identifica registros que mudaram (mesma PK, data_hash diferente)
-        # Apenas compara com a versão atual no destino
+        # 1. Identifica registros que mudaram (mesma hash_key, data_hash diferente)
         changed_records = source_df.join(
-            target_df,
-            (F.expr(join_condition)) & (F.col("target.is_current") == True) & (F.col("source.data_hash") != F.col("target.data_hash")),
+            target_df.filter(col("target.is_current") == True),
+            expr(join_condition),
             "inner"
-        ).select("source.*")
+        ).where(col("source.data_hash") != col("target.data_hash")).select("source.*")
 
         # 2. Prepara os registros que serão expirados
         records_to_expire = changed_records.select(
-            *pk_cols,
-            F.lit(False).alias("is_current"),
-            F.current_timestamp().alias("end_date")
+            col("hash_key"),
+            lit(False).alias("is_current"),
+            current_timestamp().alias("end_date")
         )
 
         # 3. Prepara os novos registros (incluindo os que mudaram e os que são totalmente novos)
-        # A união dos dois conjuntos abaixo representa o que precisa ser inserido
-        new_records_to_insert = changed_records.withColumn("is_current", F.lit(True)) \
-                                               .withColumn("start_date", F.current_timestamp()) \
-                                               .withColumn("end_date", F.lit(None).cast("timestamp"))
+        new_records_to_insert = changed_records.withColumn("is_current", lit(True)) \
+                                               .withColumn("start_date", current_timestamp()) \
+                                               .withColumn("end_date", lit(None).cast("timestamp"))
 
         brand_new_records = source_df.join(
-            target_df,
-            join_condition,
+            target_df.filter("is_current = true"),
+            "hash_key",
             "left_anti"
-        ).withColumn("is_current", F.lit(True)) \
-         .withColumn("start_date", F.current_timestamp()) \
-         .withColumn("end_date", F.lit(None).cast("timestamp"))
+        ).withColumn("is_current", lit(True)) \
+         .withColumn("start_date", current_timestamp()) \
+         .withColumn("end_date", lit(None).cast("timestamp"))
 
-        final_inserts = new_records_to_insert.unionByName(brand_new_records)
+        final_inserts = new_records_to_insert.unionByName(brand_new_records, allowMissingColumns=True)
 
-        # Executa o MERGE
-        # Passo A: Expira os registros antigos
-        (target_table.alias("target")
-            .merge(
-                records_to_expire.alias("source"),
-                join_condition
+        # Executa o MERGE para expirar os registros antigos
+        # --- CORREÇÃO APLICADA AQUI ---
+        if records_to_expire.count() > 0:
+            print(f"Expirando {records_to_expire.count()} registros antigos...")
+            (target_table.alias("target")
+                .merge(
+                    records_to_expire.alias("source"),
+                    join_condition
+                )
+                .whenMatchedUpdate(set={
+                    "is_current": "source.is_current",
+                    "end_date": "source.end_date"
+                })
+                .execute()
             )
-            .whenMatchedUpdate(set={
-                "is_current": "source.is_current",
-                "end_date": "source.end_date"
-            })
-            .execute()
-        )
         
-        # Passo B: Insere os novos registros
-        target_table.merge(
-            final_inserts.alias("source"),
-            "1 = 0" # Condição falsa para garantir que seja sempre INSERT
-        ).whenNotMatchedInsertAll().execute()
+        # Insere os registros novos/atualizados
+        # --- CORREÇÃO APLICADA AQUI ---
+        if final_inserts.count() > 0:
+            print(f"Inserindo {final_inserts.count()} registros novos/atualizados...")
+            final_inserts.write.format("delta").mode("append").saveAsTable(target_table_name)
         
         print("Operação de Merge SCD Tipo 2 concluída.")
     
@@ -154,68 +184,76 @@ class SparkEngine(BaseEngine):
             .execute())
         
     def create_table(self, config: PipelineConfig):
-        """Cria uma tabela Delta vazia com schema, constraints e comentários do Unity Catalog."""
         sink_config = config.sink
         target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
         
-        if self.spark._jsparkSession.catalog().tableExists(target_table_name):
+        if self._table_exists(target_table_name):
             print(f"Tabela '{target_table_name}' já existe. Nenhuma ação será tomada.")
             return
 
         print(f"Construindo DDL para a tabela '{target_table_name}'...")
         
-        # Constrói a lista de colunas para o DDL
-        column_definitions = [
-            "id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1) COMMENT 'Chave primária surrogate auto-incrementada.'"
-        ]
-        primary_keys = []
+        ddl = ""
 
-        for spec in config.columns:
-            final_name = self._get_final_column_name(spec, config.defaults)
-            if spec.pk:
-                primary_keys.append(final_name)
+        if config.pipeline_type == 'gold':
+            # Tabelas Gold têm um schema simples definido pela transformação
+            column_definitions = []
+            for spec in config.columns:
+                comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
+                column_definitions.append(f"{spec.name} {spec.type}{comment_str}")
             
-            is_not_null = any(v.rule == "not_null" for v in spec.validate)
-            not_null_str = " NOT NULL" if is_not_null else ""
-            comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
-            column_definitions.append(f"{final_name} {spec.type}{not_null_str}{comment_str}")
-
-        # Adiciona colunas do framework
-        column_definitions.append("hash_key STRING COMMENT 'Hash das chaves primárias para otimização de merge.'")
-        column_definitions.append("updated_at TIMESTAMP COMMENT 'Timestamp da última atualização do registro.'")
-
-        if config.sink.scd and config.sink.scd.type == '2':
-            column_definitions.append("data_hash STRING COMMENT 'Hash dos dados para detecção de mudanças.'")
-            column_definitions.append("is_current BOOLEAN COMMENT 'Flag que indica se o registro é a versão ativa.'")
-            column_definitions.append("start_date TIMESTAMP COMMENT 'Data de início da validade do registro.'")
-            column_definitions.append("end_date TIMESTAMP COMMENT 'Data de fim da validade do registro.'")
-        else:
-             column_definitions.append("created_at TIMESTAMP COMMENT 'Timestamp de criação do registro.'")
+            ddl = f"CREATE TABLE {target_table_name} ({', '.join(column_definitions)})"
+            if config.description:
+                ddl += f" COMMENT '{config.description}'"
+            if sink_config.partition_by:
+                ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
         
-        # Define a constraint de Primary Key
-        if primary_keys:
-            pk_constraint = f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY ({', '.join(primary_keys)})"
-        else:
-            # Se nenhuma PK for definida, o ID auto-incrementado se torna a PK.
-            pk_constraint = f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY (id)"
+        else: # Lógica para Silver
+            column_definitions = ["id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1) COMMENT 'Chave primária surrogate auto-incrementada.'"]
+            primary_keys = []
+            for spec in config.columns:
+                final_name = self._get_final_column_name(spec, config.defaults)
+                if spec.pk:
+                    primary_keys.append(final_name)
+                is_not_null = any(v.rule == "not_null" for v in spec.validation_rules)
+                not_null_str = " NOT NULL" if is_not_null else ""
+                comment_str = f" COMMENT '{spec.description}'" if spec.description else ""
+                column_definitions.append(f"{final_name} {spec.type}{not_null_str}{comment_str}")
 
-        # Monta o DDL final
-        ddl = f"""
-        CREATE TABLE {target_table_name} (
-            {', '.join(column_definitions)}
-            {pk_constraint}
-        )
-        """
-        if config.description:
-            ddl += f" COMMENT '{config.description}'"
-        if sink_config.partition_by:
-            ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
+            if config.sink.scd and config.sink.scd.type == '2':
+                column_definitions.extend([
+                    "data_hash STRING COMMENT 'Hash dos dados para detecção de mudanças.'",
+                    "is_current BOOLEAN COMMENT 'Flag que indica se o registro é a versão ativa.'",
+                    "start_date TIMESTAMP COMMENT 'Data de início da validade do registro.'",
+                    "end_date TIMESTAMP COMMENT 'Data de fim da validade do registro.'"
+                ])
+            else:
+                column_definitions.append("created_at TIMESTAMP COMMENT 'Timestamp de criação do registro.'")
+            
+            column_definitions.extend([
+                "hash_key STRING COMMENT 'Hash das chaves primárias.'",
+                "updated_at TIMESTAMP COMMENT 'Timestamp da última atualização.'"
+            ])
+            
+            pk_constraint = f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY ({', '.join(primary_keys)})" if primary_keys else f", CONSTRAINT pk_{sink_config.table} PRIMARY KEY (id)"
+            ddl = f"CREATE TABLE {target_table_name} ({', '.join(column_definitions)}{pk_constraint})"
+            if config.description:
+                ddl += f" COMMENT '{config.description}'"
+            if sink_config.partition_by:
+                ddl += f" PARTITIONED BY ({', '.join(sink_config.partition_by)})"
+            
+            # self.spark.sql(ddl)
+            # self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
 
         print("Executando DDL de criação da tabela...")
         self.spark.sql(ddl)
+
+         # Define as propriedades da tabela após a criação, se for Silver
+        if config.pipeline_type == 'silver':
+            primary_keys = [self._get_final_column_name(spec, config.defaults) for spec in config.columns if spec.pk]
+            if primary_keys:
+                self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
         
-        # Armazena as PKs nas propriedades da tabela para futuras comparações
-        self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
         print("Tabela criada com sucesso.")
 
     def update_table(self, config: PipelineConfig):

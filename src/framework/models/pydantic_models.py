@@ -12,7 +12,7 @@ class ColumnSpec(BaseModel):
     description: Optional[str] = None
     pk: bool = False
     transform: Optional[str] = None
-    validate: List[ValidationRule] = []
+    validation_rules: List[ValidationRule] = Field([], alias='validate')
     format: Optional[str] = None
     try_cast: bool = False
 
@@ -49,6 +49,10 @@ class TestConfig(BaseModel):
     source_data_path: str = Field(..., description="Caminho para os dados de entrada usados apenas no teste.")
     expected_results_table: str = Field(..., description="Nome completo da tabela que contém os resultados esperados.")
 
+class TransformationConfig(BaseModel):
+    type: Literal['sql']
+    sql: str
+
 class PipelineConfig(BaseModel):
     engine: Literal['spark', 'pandas', 'polars'] = 'spark'
     pipeline_type: Literal['silver', 'gold']
@@ -59,6 +63,7 @@ class PipelineConfig(BaseModel):
     source: Optional[SourceConfig] = None
     sink: SinkConfig
     columns: List[ColumnSpec]
+    transformation: Optional[TransformationConfig] = None
     table_validations: List[TableValidation] = []
     validation_log_table: Optional[str] = None
     test: Optional[TestConfig] = None # <-- Adicionada a configuração de teste opcional

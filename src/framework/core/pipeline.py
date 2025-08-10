@@ -17,11 +17,20 @@ class Pipeline:
         validator = ValidateStep()
         writer = WriterStep()
 
-        df = reader.execute(engine=self.engine, config=self.config)
-        transformed_df = transformer.execute(df, engine=self.engine, config=self.config)
-        validated_df, validation_log_df = validator.execute(transformed_df, engine=self.engine, config=self.config)
+        df_transformed = None
+        if self.config.pipeline_type == 'silver':
+            df_source = reader.execute(engine=self.engine, config=self.config)
+            df_transformed = transformer.execute(df_source, engine=self.engine, config=self.config)
+        elif self.config.pipeline_type == 'gold':
+            # Para Gold, a transformação lê as dependências e cria o DataFrame
+            df_transformed = transformer.execute(None, engine=self.engine, config=self.config)
+        else:
+            raise ValueError(f"Pipeline type '{self.config.pipeline_type}' não suportado.")
+
+        validated_df, validation_log_df = validator.execute(df_transformed, engine=self.engine, config=self.config)
         writer.execute(validated_df, engine=self.engine, config=self.config, validation_log_df=validation_log_df)
         print(f"--- Pipeline {self.config.pipeline_name} concluído com sucesso. ---")
+
 
     def create(self):
         print(f"--- Iniciando criação da tabela para: {self.config.pipeline_name} ---")
@@ -33,7 +42,6 @@ class Pipeline:
         self.engine.update_table(self.config)
         print("--- Atualização da tabela concluída. ---")
 
-    # --- NOVO ---
     def test(self):
         """Executa o pipeline em modo de teste."""
         if not self.config.test:
