@@ -42,17 +42,26 @@ class ValidateStep(BaseStep):
                 validator = self._get_validator(rule_name, param)
                 if validator:
                     failures_df, _ = validator.apply(df_to_validate, final_column_name)
-                    # --- CORREÇÃO APLICADA AQUI ---
                     if failures_df.count() > 0:
                         print(f"  -> [AVISO] {failures_df.count()} registros falharam na regra '{validation.rule}' para a coluna '{final_column_name}'.")
-                        pk_cols = [engine._get_final_column_name(c, config.defaults) for c in config.columns if c.pk]
-                        log_info_df = failures_df.select(
-                            *pk_cols, F.col(final_column_name).alias("failed_value")
-                        ).withColumn("pipeline_name", F.lit(config.pipeline_name)) \
-                         .withColumn("validation_rule", F.lit(validation.rule)) \
-                         .withColumn("failed_column", F.lit(final_column_name)) \
-                         .withColumn("log_timestamp", F.current_timestamp())
+                        
+                        # --- LÓGICA DE LOG CORRIGIDA ---
+                        log_select_exprs = [
+                            F.lit(config.pipeline_name).alias("pipeline_name"),
+                            F.lit(validation.rule).alias("validation_rule"),
+                            F.lit(final_column_name).alias("failed_column"),
+                            F.col(final_column_name).cast("string").alias("failed_value"),
+                            F.current_timestamp().alias("log_timestamp")
+                        ]
+
+                        if "hash_key" in failures_df.columns:
+                            log_select_exprs.append(F.col("hash_key"))
+                        else:
+                            log_select_exprs.append(F.lit(None).cast("string").alias("hash_key"))
+                        
+                        log_info_df = failures_df.select(*log_select_exprs)
                         all_failures_list.append(log_info_df)
+
 
         # --- 2. PROCESSAR VALIDAÇÕES 'DROP' ---
         print("Executando validações 'drop'...")
@@ -63,7 +72,6 @@ class ValidateStep(BaseStep):
                 validator = self._get_validator(rule_name, param)
                 if validator:
                     failures_df, success_df = validator.apply(df_to_validate, final_column_name)
-                    # --- CORREÇÃO APLICADA AQUI ---
                     if failures_df.count() > 0:
                         print(f"  -> [DROP] {failures_df.count()} registros removidos pela regra '{validation.rule}' na coluna '{final_column_name}'.")
                         df_to_validate = success_df
@@ -77,7 +85,6 @@ class ValidateStep(BaseStep):
                 validator = self._get_validator(rule_name, param)
                 if validator:
                     failures_df, _ = validator.apply(df_to_validate, final_column_name)
-                    # --- CORREÇÃO APLICADA AQUI ---
                     if failures_df.count() > 0:
                         print(f"  -> [FALHA] {failures_df.count()} registros falharam na regra crítica '{validation.rule}' para a coluna '{final_column_name}'.")
                         failures_df.show()
@@ -100,12 +107,24 @@ class ValidateStep(BaseStep):
                     else:
                         print(f"  [AVISO] {e}")
 
+
         # --- 5. CONSOLIDAÇÃO DO LOG DE FALHAS ---
         final_log_df = None
         if all_failures_list:
             print("Consolidando logs de validação...")
             from functools import reduce
-            final_log_df = reduce(lambda df1, df2: df1.unionByName(df2, allowMissingColumns=True), all_failures_list)
+            
+            # Garante que a coluna hash_key exista em todos os dataframes de log antes da união
+            base_log_schema = ["pipeline_name", "validation_rule", "failed_column", "failed_value", "log_timestamp", "hash_key"]
+            
+            def standardize_df(df_to_std):
+                for col_name in base_log_schema:
+                    if col_name not in df_to_std.columns:
+                        df_to_std = df_to_std.withColumn(col_name, F.lit(None))
+                return df_to_std.select(*base_log_schema)
+
+            standardized_dfs = [standardize_df(df) for df in all_failures_list]
+            final_log_df = reduce(lambda df1, df2: df1.unionByName(df2), standardized_dfs)
 
         print("Validações concluídas.")
         return df_to_validate, final_log_df

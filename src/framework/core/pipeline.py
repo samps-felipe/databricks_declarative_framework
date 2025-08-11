@@ -39,7 +39,6 @@ class Pipeline:
                 df_transformed = transformer.execute(df_source, engine=self.engine, config=self.config)
         except Exception as e:
             raise Exception(f"Falha no passo de TRANSFORMAÇÃO do pipeline '{self.config.pipeline_name}': {e}") from e
-        
 
         try:
             validated_df, validation_log_df = validator.execute(df_transformed, engine=self.engine, config=self.config)

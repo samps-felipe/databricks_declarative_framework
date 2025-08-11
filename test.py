@@ -1,7 +1,20 @@
 # Databricks notebook source
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+# MAGIC # Enables autoreload; learn more at https://docs.databricks.com/en/files/workspace-modules.html#autoreload-for-python-modules
+# MAGIC # To disable autoreload; run %autoreload 0
+
+# COMMAND ----------
+
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+# MAGIC # Enables autoreload; learn more at https://docs.databricks.com/en/files/workspace-modules.html#autoreload-for-python-modules
+# MAGIC # To disable autoreload; run %autoreload 0
+
+# COMMAND ----------
 
 # DBTITLE 1,Setup do Ambiente de Teste
-%pip install pyyaml pydantic
+# MAGIC %pip install pyyaml pydantic
 
 # COMMAND ----------
 
@@ -11,22 +24,23 @@ import os
 import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import sha2, lit, col, concat_ws
+from pydantic import ValidationError
 
 # Adiciona o diretório do framework ao path
 # ATENÇÃO: Ajuste este caminho para o local do seu repositório
-FRAMEWORK_PATH = '/Workspace/Repos/seu_usuario/framework_declarativo_v2/src'
-if FRAMEWORK_PATH not in sys.path:
-    sys.path.append(FRAMEWORK_PATH)
+# FRAMEWORK_PATH = '/Workspace/Repos/seu_usuario/framework_declarativo_v2/src'
+# if FRAMEWORK_PATH not in sys.path:
+#     sys.path.append(FRAMEWORK_PATH)
 
-from framework.core.pipeline import Pipeline
-from framework.engines.spark_engine import SparkEngine
-from framework.models.pydantic_models import PipelineConfig
+from src.framework.core.pipeline import Pipeline
+from src.framework.engines.spark_engine import SparkEngine
+from src.framework.models.pydantic_models import PipelineConfig
 
 class TestFramework:
     """Suíte de testes estruturada para o framework declarativo."""
     spark = None
     CATALOG = "dev"
-    SCHEMA = "framework_tests_v2"
+    SCHEMA = "framework_tests"
     VOLUME_NAME = "test_files"
     BASE_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
 
@@ -41,8 +55,8 @@ class TestFramework:
 
         print(f"Ambiente de teste configurado em: {cls.CATALOG}.{cls.SCHEMA}")
         dbutils.fs.rm(cls.BASE_PATH, recurse=True)
-        os.makedirs(f"/dbfs{cls.BASE_PATH}/pipelines", exist_ok=True)
-        os.makedirs(f"/dbfs{cls.BASE_PATH}/source_data", exist_ok=True)
+        os.makedirs(f"{cls.BASE_PATH}/pipelines", exist_ok=True)
+        os.makedirs(f"{cls.BASE_PATH}/source_data", exist_ok=True)
 
         def encrypt_udf(col): return sha2(col, 256)
         cls.spark.udf.register("encrypt_udf", encrypt_udf)
@@ -63,7 +77,7 @@ class TestFramework:
         print("Ambiente limpo.")
 
     def _create_yaml_file(self, config_dict, filename):
-        path = f"/dbfs{self.BASE_PATH}/pipelines/{filename}"
+        path = f"{self.BASE_PATH}/pipelines/{filename}"
         with open(path, 'w') as f: yaml.dump(config_dict, f, sort_keys=False)
         return f"{self.BASE_PATH}/pipelines/{filename}"
 
@@ -74,7 +88,7 @@ class TestFramework:
         return dbutils.fs.ls(path)[-1].path.replace("dbfs:", "")
 
     def _run_pipeline_command(self, command, config_path):
-        with open(f"/dbfs{config_path}", 'r') as f: config_dict = yaml.safe_load(f)
+        with open(f"{config_path}", 'r') as f: config_dict = yaml.safe_load(f)
         config = PipelineConfig(**config_dict)
         engine = SparkEngine(self.spark)
         pipeline = Pipeline(config, engine)
@@ -106,7 +120,7 @@ class TestFramework:
                 {'name': 'last_name', 'rename': 'last_name', 'type': 'string'},
                 {'rename': 'full_name', 'type': 'string', 'is_derived': True, 'transform': "concat(first_name, ' ', last_name)", 'description': 'Nome completo derivado.'},
                 {'name': 'document', 'rename': 'document_encrypted', 'type': 'string', 'udf': 'encrypt_udf', 'description': 'Documento criptografado.'},
-                {'name': 'email', 'type': 'string', 'validate': [{'rule': 'pattern:^([a-zA-Z0-9_\\-\\.]+)@([a-zA-Z0-9_\\-\\.]+)\\.([a-zA-Z]{2,5})$', 'on_fail': 'warn'}]}
+                {'name': 'email','type': 'string', 'validate': [{'rule': 'pattern:^([a-zA-Z0-9_\\-\\.]+)@([a-zA-Z0-9_\\-\\.]+)\\.([a-zA-Z]{2,5})$', 'on_fail': 'warn'}]}
             ]
         }
         config_path = self._create_yaml_file(config, "dim_customers.yaml")
@@ -154,14 +168,13 @@ class TestFramework:
 
         config = {
             'pipeline_name': 'gold_fct_sales', 'pipeline_type': 'gold',
-            'dependencies': [f"{self.CATALOG}.{self.SCHEMA}.dim_customers", f"{self.CATALOG}.{self.SCHEMA}.employees_scd2", f"{self.CATALOG}.{self.SCHEMA}.sales_silver"],
+            'dependencies': [f"{self.CATALOG}.{self.SCHEMA}.customers_silver", f"{self.CATALOG}.{self.SCHEMA}.employees_scd2", f"{self.CATALOG}.{self.SCHEMA}.sales_silver"],
             'sink': {'catalog': self.CATALOG, 'schema': self.SCHEMA, 'table': 'fct_sales', 'mode': 'append'},
-            'columns': [{'rename': 'customer_sk', 'type': 'long'}, {'rename': 'product_sk', 'type': 'long'}, {'rename': 'sale_date', 'type': 'date'}, {'rename': 'quantity', 'type': 'int'}],
+            'columns': [{'name': 'customer_sk', 'type': 'long'}, {'name': 'product_sk', 'type': 'long', 'description': 'teste de descrição'}, {'name': 'sale_date', 'type': 'date'}, {'name': 'quantity', 'type': 'int'}],
             'transformation': [{'name': 'join_and_select', 'type': 'sql', 'sql': f"""
-                SELECT c.id AS customer_sk, p.id AS product_sk, s.sale_date, s.quantity
+                SELECT c.id AS customer_sk, s.sale_date, s.quantity
                 FROM sales_silver s
-                JOIN dim_customers c ON s.customer_id = c.customer_bk
-                JOIN employees_scd2 p ON s.product_id = p.employee_id AND p.is_current = true
+                LEFT JOIN customers_silver c ON s.customer_id = c.customer_bk
             """}]
         }
         config_path = self._create_yaml_file(config, "fct_sales.yaml")
@@ -180,8 +193,8 @@ class TestFramework:
             'pipeline_name': 'silver_fail_test', 'pipeline_type': 'silver',
             'source': {'format': 'csv', 'path': source_path, 'options': {'header': 'true'}},
             'sink': {'catalog': self.CATALOG, 'schema': self.SCHEMA, 'table': 'fail_test_table', 'mode': 'overwrite'},
-            'columns': [{'name': 'id', 'rename': 'id', 'type': 'int'}, {'name': 'name', 'rename': 'name', 'type': 'string'}],
-            'table_validations': [{'type': 'duplicate_check', 'columns': ['id'], 'on_fail': 'fail'}]
+            'columns': [{'name': 'id', 'rename': 'id_novo', 'type': 'int'}, {'name': 'name', 'rename': 'name', 'type': 'string'}],
+            'table_validations': [{'type': 'duplicate_check', 'columns': ['id_novo'], 'on_fail': 'fail'}]
         }
         config_path = self._create_yaml_file(config, "fail_test.yaml")
         try:
@@ -272,7 +285,7 @@ class TestFramework:
         
         try:
             # A falha deve ocorrer já na validação do Pydantic
-            with open(f"/dbfs{config_path}", 'r') as f: config_dict = yaml.safe_load(f)
+            with open(f"{config_path}", 'r') as f: config_dict = yaml.safe_load(f)
             PipelineConfig(**config_dict)
             raise AssertionError("A validação Pydantic para nomes reservados não falhou como esperado.")
         except ValidationError as e:
@@ -287,6 +300,7 @@ class TestFramework:
 # DBTITLE 5,Execução da Suíte de Testes
 test_suite = TestFramework()
 try:
+    test_suite.teardown_class()
     test_suite.setup_class()
     test_suite.test_01_silver_pipeline_with_validations()
     test_suite.test_02_scd2_dimension_pipeline()
@@ -299,5 +313,5 @@ try:
 except Exception as e:
     print("\n🔥 Um ou mais testes falharam. 🔥")
     raise e
-finally:
-    test_suite.teardown_class()
+# finally:
+#     test_suite.teardown_class()

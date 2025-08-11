@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StructType, StructField
-from pyspark.sql.functions import col, lit, current_timestamp, expr
+from pyspark.sql.functions import col, lit, current_timestamp, expr, sha2, concat_ws
 import pyspark.sql.functions as F
 from delta.tables import DeltaTable
 from ..core.engine import BaseEngine
@@ -59,11 +59,8 @@ class SparkEngine(BaseEngine):
 
     def write(self, df: DataFrame, config: PipelineConfig, validation_log_df: DataFrame = None):
         sink_config = config.sink
-        
         if validation_log_df and config.validation_log_table:
             validation_log_df.write.mode("append").saveAsTable(config.validation_log_table)
-
-        # Direciona para o método de escrita correto
         if sink_config.mode == 'merge':
             if sink_config.scd and sink_config.scd.type == '2':
                 self._merge_scd2(df, config)
@@ -72,101 +69,147 @@ class SparkEngine(BaseEngine):
         else:
             self._write_standard(df, config)
     
+    def _write_standard(self, df: DataFrame, config: PipelineConfig):
+        sink_config = config.sink
+        target_table = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
+        writer = df.write.mode(sink_config.mode)
+        if sink_config.partition_by:
+            writer = writer.partitionBy(*sink_config.partition_by)
+        if sink_config.mode in ['overwrite_partition', 'overwrite_where'] and sink_config.overwrite_condition:
+             writer = writer.option("replaceWhere", sink_config.overwrite_condition)
+        writer.option("mergeSchema", "true").saveAsTable(target_table)
+
+    def _merge_standard(self, df: DataFrame, config: PipelineConfig):
+        """Executa uma operação de merge (upsert) padrão, ignorando a coluna 'id'."""
+        target_table_name = f"{config.sink.catalog}.{config.sink.schema_name}.{config.sink.table}"
+        delta_table = DeltaTable.forName(self.spark, target_table_name)
+        
+        update_map = {c: f"source.{c}" for c in df.columns if c not in ["id", "hash_key", "created_at"]}
+        update_map["updated_at"] = "source.updated_at"
+        
+        insert_map = {c: f"source.{c}" for c in df.columns if c != "id"}
+        if "created_at" in df.columns:
+            insert_map["created_at"] = "source.updated_at"
+
+        (delta_table.alias("target")
+            .merge(df.alias("source"), "target.hash_key = source.hash_key")
+            .whenMatchedUpdate(set=update_map)
+            .whenNotMatchedInsert(values=insert_map)
+            .execute())
 
     def _merge_scd2(self, df: DataFrame, config: PipelineConfig):
-        """Executa a lógica de merge para Slowly Changing Dimension Tipo 2 usando a hash_key."""
-        sink_config = config.sink
-        target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
+        """Executa a lógica de merge para SCD Tipo 2 de forma robusta e idempotente."""
+        target_table_name = f"{config.sink.catalog}.{config.sink.schema_name}.{config.sink.table}"
         
         source_df = df.alias("source")
         target_table = DeltaTable.forName(self.spark, target_table_name)
         target_df = target_table.toDF().alias("target")
-
         join_condition = "source.hash_key = target.hash_key"
 
         # 1. Identifica registros que mudaram (mesma hash_key, data_hash diferente)
         changed_records = source_df.join(
             target_df.filter(col("target.is_current") == True),
-            expr(join_condition),
-            "inner"
+            expr(join_condition), "inner"
         ).where(col("source.data_hash") != col("target.data_hash")).select("source.*")
 
         # 2. Prepara os registros que serão expirados
-        records_to_expire = changed_records.select(
-            col("hash_key"),
-            lit(False).alias("is_current"),
-            current_timestamp().alias("end_date")
-        )
+        records_to_expire = changed_records.select(col("hash_key"), lit(False).alias("is_current"), current_timestamp().alias("end_date"))
 
         # 3. Prepara os novos registros (incluindo os que mudaram e os que são totalmente novos)
-        new_records_to_insert = changed_records.withColumn("is_current", lit(True)) \
-                                               .withColumn("start_date", current_timestamp()) \
-                                               .withColumn("end_date", lit(None).cast("timestamp"))
-
-        brand_new_records = source_df.join(
-            target_df.filter("is_current = true"),
-            "hash_key",
-            "left_anti"
-        ).withColumn("is_current", lit(True)) \
-         .withColumn("start_date", current_timestamp()) \
-         .withColumn("end_date", lit(None).cast("timestamp"))
-
+        new_records_to_insert = changed_records.withColumn("is_current", lit(True)).withColumn("start_date", current_timestamp()).withColumn("end_date", lit(None).cast("timestamp"))
+        brand_new_records = source_df.join(target_df.filter("is_current = true"), "hash_key", "left_anti").withColumn("is_current", lit(True)).withColumn("start_date", current_timestamp()).withColumn("end_date", lit(None).cast("timestamp"))
         final_inserts = new_records_to_insert.unionByName(brand_new_records, allowMissingColumns=True)
 
-        # Executa o MERGE para expirar os registros antigos
-        # --- CORREÇÃO APLICADA AQUI ---
+        # 4. Expira os registros antigos usando MERGE (operação de UPDATE)
         if records_to_expire.count() > 0:
             print(f"Expirando {records_to_expire.count()} registros antigos...")
             (target_table.alias("target")
-                .merge(
-                    records_to_expire.alias("source"),
-                    join_condition
-                )
-                .whenMatchedUpdate(set={
-                    "is_current": "source.is_current",
-                    "end_date": "source.end_date"
-                })
-                .execute()
-            )
+                .merge(records_to_expire.alias("source"), f"{join_condition} AND target.is_current = true")
+                .whenMatchedUpdate(set={"is_current": "source.is_current", "end_date": "source.end_date"})
+                .execute())
         
-        # Insere os registros novos/atualizados
+        # 5. Insere os registros novos/atualizados de forma idempotente
         if final_inserts.count() > 0:
             print(f"Inserindo {final_inserts.count()} registros novos/atualizados...")
-            final_inserts.write.format("delta").mode("append").saveAsTable(target_table_name)
+            # Para garantir a idempotência, filtramos os registros que já podem existir na tabela de destino
+            existing_versions = target_table.toDF().select("hash_key", "data_hash")
+            
+            records_to_actually_insert = final_inserts.join(
+                existing_versions,
+                (final_inserts.hash_key == existing_versions.hash_key) & (final_inserts.data_hash == existing_versions.data_hash),
+                "left_anti"
+            )
+            
+            # Usa um append direto, que é mais robusto para inserções e respeita colunas de identidade.
+            if records_to_actually_insert.count() > 0:
+                records_to_actually_insert.write.format("delta").mode("append").saveAsTable(target_table_name)
         
         print("Operação de Merge SCD Tipo 2 concluída.")
+
+    def update_table(self, config: PipelineConfig):
+        """Aplica alterações de schema e metadados a uma tabela existente."""
+        target_table_name = f"{config.sink.catalog}.{config.sink.schema_name}.{config.sink.table}"
+
+        if not self._table_exists(target_table_name):
+            raise Exception(f"Tabela '{target_table_name}' não existe. Use o comando 'create' primeiro.")
+
+        print(f"Atualizando schema e metadados para a tabela '{target_table_name}'...")
+        
+        existing_schema = self.spark.read.table(target_table_name).schema
+        existing_cols = {field.name: field for field in existing_schema.fields}
+        
+        for spec in config.columns:
+            final_name = self._get_final_column_name(spec, config.defaults)
+            
+            if final_name not in existing_cols:
+                comment = spec.description or ''
+                self.spark.sql(f"ALTER TABLE {target_table_name} ADD COLUMN `{final_name}` {spec.type} COMMENT '{comment}'")
+                print(f"  -> Coluna '{final_name}' adicionada.")
+            else:
+                existing_comment = existing_cols[final_name].metadata.get('comment', '')
+                new_comment = spec.description or ''
+                if new_comment and new_comment != existing_comment:
+                    self.spark.sql(f"ALTER TABLE {target_table_name} ALTER COLUMN `{final_name}` COMMENT '{new_comment}'")
+                    print(f"  -> Comentário da coluna '{final_name}' atualizado.")
     
-    
-    def _write_standard(self, df: DataFrame, config: PipelineConfig):
-        sink_config = config.sink
-        target_table = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
-        writer = df.write.mode(sink_config.mode)
+        print("Verificando necessidade de reprocessar hash_key...")
+        try:
+            tbl_properties_str = self.spark.sql(f"DESCRIBE TABLE EXTENDED {target_table_name}").filter("col_name = 'Table Properties'").collect()[0]['data_type']
+            match = re.search(r"framework\.primary_keys=([a-zA-Z0-9_,]+)", tbl_properties_str)
+            existing_pks_str = match.group(1) if match else ""
+            existing_pks = set(existing_pks_str.split(',')) if existing_pks_str else set()
+        except (IndexError, AttributeError):
+            existing_pks = set()
 
-        if sink_config.partition_by:
-            writer = writer.partitionBy(*sink_config.partition_by)
-        
-        if sink_config.mode in ['overwrite_partition', 'overwrite_where'] and sink_config.overwrite_condition:
-             writer = writer.option("replaceWhere", sink_config.overwrite_condition)
+        new_pks = {self._get_final_column_name(spec, config.defaults) for spec in config.columns if spec.pk}
 
-        writer.option("mergeSchema", "true").saveAsTable(target_table)
-
-    def _merge(self, df: DataFrame, config: PipelineConfig):
-        sink_config = config.sink
-        target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
-        
-        delta_table = DeltaTable.forName(self.spark, target_table_name)
-        
-        update_set = {col: f"source.{col}" for col in df.columns if col not in ["hash_key", "created_at"]}
-        update_set["updated_at"] = "source.updated_at"
-
-        insert_values = {col: f"source.{col}" for col in df.columns}
-        insert_values["created_at"] = "source.updated_at" # Para novos registros, created_at é o mesmo que updated_at
-
-        (delta_table.alias("target")
-            .merge(df.alias("source"), "target.hash_key = source.hash_key")
-            .whenMatchedUpdate(set=update_set)
-            .whenNotMatchedInsert(values=insert_values)
-            .execute())
+        if new_pks != existing_pks:
+            print(f"[AVISO] As chaves primárias mudaram de {existing_pks} para {new_pks}. Reprocessando a coluna 'hash_key'...")
+            
+            full_table_df = self.spark.read.table(target_table_name)
+            
+            reprocessed_df = full_table_df.drop("hash_key").withColumn(
+                "hash_key", sha2(concat_ws("||", *sorted(list(new_pks))), 256)
+            )
+            
+            # --- LÓGICA CORRIGIDA ---
+            # Usa um MERGE para atualizar a coluna hash_key em loco, preservando o id.
+            target_table = DeltaTable.forName(self.spark, target_table_name)
+            (target_table.alias("target")
+                .merge(
+                    reprocessed_df.alias("source"),
+                    "target.id = source.id" # A junção é na chave surrogate imutável
+                )
+                .whenMatchedUpdate(set={
+                    "hash_key": "source.hash_key" # Atualiza apenas a hash_key
+                })
+                .execute())
+            
+            self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(sorted(list(new_pks)))}')")
+            print("  -> Reprocessamento do hash_key concluído.")
+        else:
+            print("  -> Chaves primárias não foram alteradas. Nenhuma ação necessária para hash_key.")
+            
     
     def create_table(self, config: PipelineConfig):
         """Cria uma tabela no Unity Catalog com uma lógica unificada para Silver e Gold."""
@@ -246,65 +289,11 @@ class SparkEngine(BaseEngine):
             failed_column STRING,
             failed_value STRING,
             log_timestamp TIMESTAMP,
-            primary_keys MAP<STRING, STRING> COMMENT 'Chaves primárias do registro que falhou (coluna: valor).'
+            hash_key STRING COMMENT 'Hash das chaves primárias do registro que falhou.'
         )
         """
         self.spark.sql(log_ddl)
         print("Tabela de log de validação criada com sucesso.")
-
-
-    def update_table(self, config: PipelineConfig):
-        """Aplica alterações de schema e metadados a uma tabela existente."""
-        sink_config = config.sink
-        target_table_name = f"{sink_config.catalog}.{sink_config.schema_name}.{sink_config.table}"
-
-        if not self.spark._jsparkSession.catalog().tableExists(target_table_name):
-            raise Exception(f"Tabela '{target_table_name}' não existe. Use o comando 'create' primeiro.")
-
-        print(f"Atualizando schema e metadados para a tabela '{target_table_name}'...")
-        
-        target_schema = self._build_spark_schema(config)
-        existing_schema = self.spark.read.table(target_table_name).schema
-        existing_cols = {field.name: field for field in existing_schema.fields}
-        
-        # Adiciona novas colunas e atualiza comentários
-        for field in target_schema.fields:
-            if field.name not in existing_cols:
-                comment = field.metadata.get('comment', '')
-                self.spark.sql(f"ALTER TABLE {target_table_name} ADD COLUMN {field.name} {field.dataType.simpleString()} COMMENT '{comment}'")
-                print(f"  -> Coluna '{field.name}' adicionada.")
-            else:
-                existing_comment = existing_cols[field.name].metadata.get('comment', '')
-                new_comment = field.metadata.get('comment', '')
-                if new_comment and new_comment != existing_comment:
-                    self.spark.sql(f"ALTER TABLE {target_table_name} ALTER COLUMN {field.name} COMMENT '{new_comment}'")
-                    print(f"  -> Comentário da coluna '{field.name}' atualizado.")
-        
-        # Lógica para reprocessar hash_key se as PKs mudarem
-        print("Verificando necessidade de reprocessar hash_key...")
-        try:
-            tbl_properties = self.spark.sql(f"DESCRIBE TABLE EXTENDED {target_table_name}").filter("col_name = 'Table Properties'").collect()[0]['data_type']
-            existing_pks_str = re.search(r"framework.primary_keys=([a-zA-Z0-9_,]+)", tbl_properties).group(1)
-            existing_pks = set(existing_pks_str.split(','))
-        except (IndexError, AttributeError):
-            existing_pks = set()
-
-        new_pks = {self._get_final_column_name(spec, config.defaults) for spec in config.columns if spec.pk}
-
-        if new_pks != existing_pks:
-            print(f"[AVISO] As chaves primárias mudaram de {existing_pks} para {new_pks}. Reprocessando a coluna 'hash_key'...")
-            from pyspark.sql.functions import sha2, concat_ws
-            
-            full_table_df = self.spark.read.table(target_table_name)
-            reprocessed_df = full_table_df.drop("hash_key").withColumn(
-                "hash_key", sha2(concat_ws("||", *sorted(list(new_pks))), 256)
-            )
-            
-            reprocessed_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(target_table_name)
-            self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(sorted(list(new_pks)))}')")
-            print("  -> Reprocessamento do hash_key concluído.")
-        else:
-            print("  -> Chaves primárias não foram alteradas. Nenhuma ação necessária para hash_key.")
 
     def read_table(self, table_name: str) -> DataFrame:
         return self.spark.read.table(table_name)

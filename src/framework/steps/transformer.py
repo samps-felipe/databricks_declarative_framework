@@ -72,13 +72,22 @@ class TransformStep(BaseStep):
         return current_df
 
     def _transform_gold(self, engine: BaseEngine, config: PipelineConfig) -> DataFrame:
-        """Executa a transformação Gold e adiciona as colunas de controle."""
+        """Executa a transformação Gold, aplica o casting de tipos e adiciona as colunas de controle."""
         current_df = engine.execute_gold_transformation(config)
         
+        # Aplica o casting de tipos definido no YAML para garantir o schema correto.
+        for spec in config.columns:
+            final_name = spec.rename
+            if final_name in current_df.columns:
+                cast_func = "try_cast" if spec.try_cast else "cast"
+                current_df = current_df.withColumn(final_name, expr(f"{cast_func}({final_name} AS {spec.type})"))
+
+        # Adiciona as colunas de controle do framework
         pk_cols = [spec.rename for spec in config.columns if spec.pk]
         if pk_cols:
             current_df = current_df.withColumn("hash_key", sha2(concat_ws("||", *sorted(pk_cols)), 256))
 
         current_df = current_df.withColumn("updated_at", current_timestamp())
+        current_df = current_df.withColumn("created_at", col("updated_at"))
         
         return current_df
