@@ -1,34 +1,32 @@
 from abc import ABC, abstractmethod
 from pyspark.sql import DataFrame, functions as F
 from typing import Tuple
-import ast # Usado para converter strings em listas de forma segura
+import ast
+from .. import quality
 
-# --- Classes Abstratas para Definir o Contrato de Validação ---
+# --- Abstract Base Classes ---
 
 class BaseValidation(ABC):
-    """Classe base para todas as validações de coluna."""
+    """Base class for all column validations."""
+    def __init__(self, **kwargs):
+        # Universal constructor
+        pass
+
     @abstractmethod
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
-        """
-        Aplica a regra de validação.
-        Retorna:
-            - DataFrame com os registros que falharam na validação.
-            - DataFrame com os registros que passaram na validação.
-        """
+        """Applies the validation rule."""
         pass
 
 class BaseTableValidation(ABC):
-    """Classe base para todas as validações de tabela."""
+    """Base class for all table validations."""
     @abstractmethod
     def apply(self, df: DataFrame):
-        """
-        Aplica a regra de validação na tabela inteira.
-        Pode retornar nada e lançar uma exceção em caso de falha.
-        """
+        """Applies the validation rule to the entire table."""
         pass
 
-# --- Implementações de Validações de Coluna ---
+# --- Column Validation Implementations ---
 
+@quality.register_rule("not_null")
 class NotNullValidation(BaseValidation):
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
         condition = F.col(column_name).isNotNull()
@@ -36,8 +34,9 @@ class NotNullValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
+@quality.register_rule("pattern")
 class PatternValidation(BaseValidation):
-    def __init__(self, pattern: str):
+    def __init__(self, pattern: str, **kwargs):
         self.pattern = pattern
 
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
@@ -46,16 +45,16 @@ class PatternValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
+@quality.register_rule("isin")
 class IsInValidation(BaseValidation):
-    """Valida se o valor da coluna está em uma lista de valores permitidos."""
-    def __init__(self, allowed_values_str: str):
+    """Validates if the column value is in a list of allowed values."""
+    def __init__(self, allowed_values_str: str, **kwargs):
         try:
-            # Usa ast.literal_eval para converter a string '[]' em uma lista Python de forma segura
             self.allowed_values = ast.literal_eval(allowed_values_str)
             if not isinstance(self.allowed_values, list):
                 raise TypeError
         except (ValueError, SyntaxError, TypeError):
-            raise ValueError(f"Parâmetro inválido para a regra 'isin'. Esperado um formato de lista, ex: ['A', 'B']. Recebido: {allowed_values_str}")
+            raise ValueError(f"Invalid parameter for 'isin' rule. Expected a list format, e.g., ['A', 'B']. Received: {allowed_values_str}")
 
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
         condition = F.col(column_name).isin(self.allowed_values)
@@ -63,13 +62,14 @@ class IsInValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
+@quality.register_rule("greater_than_or_equal_to")
 class GreaterThanOrEqualToValidation(BaseValidation):
-    """Valida se o valor da coluna é maior ou igual a um valor numérico."""
-    def __init__(self, value_str: str):
+    """Validates if the column value is greater than or equal to a numeric value."""
+    def __init__(self, value_str: str, **kwargs):
         try:
             self.value = float(value_str)
         except ValueError:
-            raise ValueError(f"Parâmetro inválido para 'greater_than_or_equal_to'. Esperado um número. Recebido: {value_str}")
+            raise ValueError(f"Invalid parameter for 'greater_than_or_equal_to'. Expected a number. Received: {value_str}")
 
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
         condition = F.col(column_name) >= self.value
@@ -77,9 +77,10 @@ class GreaterThanOrEqualToValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
+@quality.register_rule("isbetween")
 class IsBetweenValidation(BaseValidation):
-    """Valida se o valor da coluna está entre um limite inferior e superior."""
-    def __init__(self, bounds_str: str):
+    """Validates if the column value is between a lower and upper bound."""
+    def __init__(self, bounds_str: str, **kwargs):
         try:
             bounds = ast.literal_eval(bounds_str)
             if not isinstance(bounds, list) or len(bounds) != 2:
@@ -87,7 +88,7 @@ class IsBetweenValidation(BaseValidation):
             self.lower_bound = float(bounds[0])
             self.upper_bound = float(bounds[1])
         except (ValueError, SyntaxError, TypeError):
-            raise ValueError(f"Parâmetro inválido para 'isbetween'. Esperado uma lista com dois números, ex: [0, 100]. Recebido: {bounds_str}")
+            raise ValueError(f"Invalid parameter for 'isbetween'. Expected a list of two numbers, e.g., [0, 100]. Received: {bounds_str}")
 
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
         condition = F.col(column_name).between(self.lower_bound, self.upper_bound)
@@ -95,14 +96,14 @@ class IsBetweenValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
-# --- Implementações de Validações de Tabela ---
+# --- Table Validation Implementations ---
 
+@quality.register_rule("duplicate_check")
 class DuplicateCheckValidation(BaseTableValidation):
-    def __init__(self, columns: list):
+    def __init__(self, columns: list, **kwargs):
         self.columns = columns
 
     def apply(self, df: DataFrame):
         duplicate_count = df.groupBy(*self.columns).count().filter("count > 1").count()
         if duplicate_count > 0:
-            # A lógica de 'fail' ou 'warn' será tratada pelo orquestrador (validator.py)
-            raise ValueError(f"Verificação de duplicatas falhou para as colunas: {self.columns}. {duplicate_count} duplicatas encontradas.")
+            raise ValueError(f"Duplicate check failed for columns: {self.columns}. {duplicate_count} duplicates found.")

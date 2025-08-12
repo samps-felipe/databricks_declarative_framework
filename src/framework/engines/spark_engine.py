@@ -2,6 +2,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StructType, StructField
 from pyspark.sql.functions import col, lit, current_timestamp, expr, sha2, concat_ws
 import pyspark.sql.functions as F
+from pyspark.sql.utils import AnalysisException
 from delta.tables import DeltaTable
 from ..core.engine import BaseEngine
 from ..models.pydantic_models import PipelineConfig
@@ -18,9 +19,8 @@ class SparkEngine(BaseEngine):
             # Usar DESCRIBE é uma maneira padrão de verificar a existência de uma tabela
             self.spark.sql(f"DESCRIBE TABLE EXTENDED {table_name}")
             return True
-        except Exception as e:
-            # O erro para "tabela não encontrada" geralmente contém esta string
-            if "TABLE_OR_VIEW_NOT_FOUND" in str(e).upper():
+        except AnalysisException as e:
+            if 'TABLE_OR_VIEW_NOT_FOUND' in str(e).upper():
                 return False
             # Se for outro erro, lança a exceção
             raise e
@@ -33,21 +33,6 @@ class SparkEngine(BaseEngine):
         if defaults.column_rename_pattern == 'snake_case':
             return _apply_rename_pattern(spec.name)
         return spec.name
-
-    def _build_spark_schema(self, config: PipelineConfig) -> StructType:
-        """Constrói um StructType do Spark a partir da configuração YAML."""
-        fields = []
-        for spec in config.columns:
-            final_name = self._get_final_column_name(spec, config.defaults)
-            metadata = {"comment": spec.description} if spec.description else {}
-            fields.append(StructField(final_name, spec.type, True, metadata))
-        
-        # Adiciona as colunas internas do framework
-        fields.append(StructField("hash_key", "string", True, {"comment": "Hash das chaves primárias para otimização de merge."}))
-        fields.append(StructField("created_at", "timestamp", True, {"comment": "Timestamp de criação do registro."}))
-        fields.append(StructField("updated_at", "timestamp", True, {"comment": "Timestamp da última atualização do registro."}))
-        
-        return StructType(fields)
 
     def read(self, config: PipelineConfig) -> DataFrame:
         source_config = config.source
@@ -97,6 +82,28 @@ class SparkEngine(BaseEngine):
             .whenNotMatchedInsert(values=insert_map)
             .execute())
 
+    def _scd2_expire_old_records(self, target_table: DeltaTable, records_to_expire: DataFrame, join_condition: str):
+        """Expira registros antigos em uma operação SCD2."""
+        if records_to_expire.head(1):
+            print(f"Expirando registros antigos...")
+            (target_table.alias("target")
+                .merge(records_to_expire.alias("source"), f"{join_condition} AND target.is_current = true")
+                .whenMatchedUpdate(set={"is_current": "source.is_current", "end_date": "source.end_date"})
+                .execute())
+
+    def _scd2_insert_new_records(self, target_table: DeltaTable, final_inserts: DataFrame, target_table_name: str):
+        """Insere novos registros em uma operação SCD2."""
+        if final_inserts.head(1):
+            print(f"Inserindo registros novos/atualizados...")
+            existing_versions = target_table.toDF().select("hash_key", "data_hash")
+            records_to_actually_insert = final_inserts.join(
+                existing_versions,
+                (final_inserts.hash_key == existing_versions.hash_key) & (final_inserts.data_hash == existing_versions.data_hash),
+                "left_anti"
+            )
+            if records_to_actually_insert.head(1):
+                records_to_actually_insert.write.format("delta").mode("append").saveAsTable(target_table_name)
+
     def _merge_scd2(self, df: DataFrame, config: PipelineConfig):
         """Executa a lógica de merge para SCD Tipo 2 de forma robusta e idempotente."""
         target_table_name = f"{config.sink.catalog}.{config.sink.schema_name}.{config.sink.table}"
@@ -106,43 +113,19 @@ class SparkEngine(BaseEngine):
         target_df = target_table.toDF().alias("target")
         join_condition = "source.hash_key = target.hash_key"
 
-        # 1. Identifica registros que mudaram (mesma hash_key, data_hash diferente)
         changed_records = source_df.join(
             target_df.filter(col("target.is_current") == True),
             expr(join_condition), "inner"
         ).where(col("source.data_hash") != col("target.data_hash")).select("source.*")
 
-        # 2. Prepara os registros que serão expirados
         records_to_expire = changed_records.select(col("hash_key"), lit(False).alias("is_current"), current_timestamp().alias("end_date"))
 
-        # 3. Prepara os novos registros (incluindo os que mudaram e os que são totalmente novos)
         new_records_to_insert = changed_records.withColumn("is_current", lit(True)).withColumn("start_date", current_timestamp()).withColumn("end_date", lit(None).cast("timestamp"))
         brand_new_records = source_df.join(target_df.filter("is_current = true"), "hash_key", "left_anti").withColumn("is_current", lit(True)).withColumn("start_date", current_timestamp()).withColumn("end_date", lit(None).cast("timestamp"))
         final_inserts = new_records_to_insert.unionByName(brand_new_records, allowMissingColumns=True)
 
-        # 4. Expira os registros antigos usando MERGE (operação de UPDATE)
-        if records_to_expire.count() > 0:
-            print(f"Expirando {records_to_expire.count()} registros antigos...")
-            (target_table.alias("target")
-                .merge(records_to_expire.alias("source"), f"{join_condition} AND target.is_current = true")
-                .whenMatchedUpdate(set={"is_current": "source.is_current", "end_date": "source.end_date"})
-                .execute())
-        
-        # 5. Insere os registros novos/atualizados de forma idempotente
-        if final_inserts.count() > 0:
-            print(f"Inserindo {final_inserts.count()} registros novos/atualizados...")
-            # Para garantir a idempotência, filtramos os registros que já podem existir na tabela de destino
-            existing_versions = target_table.toDF().select("hash_key", "data_hash")
-            
-            records_to_actually_insert = final_inserts.join(
-                existing_versions,
-                (final_inserts.hash_key == existing_versions.hash_key) & (final_inserts.data_hash == existing_versions.data_hash),
-                "left_anti"
-            )
-            
-            # Usa um append direto, que é mais robusto para inserções e respeita colunas de identidade.
-            if records_to_actually_insert.count() > 0:
-                records_to_actually_insert.write.format("delta").mode("append").saveAsTable(target_table_name)
+        self._scd2_expire_old_records(target_table, records_to_expire, join_condition)
+        self._scd2_insert_new_records(target_table, final_inserts, target_table_name)
         
         print("Operação de Merge SCD Tipo 2 concluída.")
 
@@ -175,7 +158,7 @@ class SparkEngine(BaseEngine):
         print("Verificando necessidade de reprocessar hash_key...")
         try:
             tbl_properties_str = self.spark.sql(f"DESCRIBE TABLE EXTENDED {target_table_name}").filter("col_name = 'Table Properties'").collect()[0]['data_type']
-            match = re.search(r"framework\.primary_keys=([a-zA-Z0-9_,]+)", tbl_properties_str)
+            match = re.search(r"framework\\.primary_keys=([a-zA-Z0-9_,]+)", tbl_properties_str)
             existing_pks_str = match.group(1) if match else ""
             existing_pks = set(existing_pks_str.split(',')) if existing_pks_str else set()
         except (IndexError, AttributeError):
@@ -276,7 +259,7 @@ class SparkEngine(BaseEngine):
         print("Executando DDL de criação da tabela...")
         self.spark.sql(ddl)
         if primary_keys:
-            self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(primary_keys)}')")
+            self.spark.sql(f"ALTER TABLE {target_table_name} SET TBLPROPERTIES ('framework.primary_keys' = '{','.join(sorted(list(primary_keys)))}')")
         print("Tabela criada com sucesso.")
 
     def _create_validation_log_table(self, config: PipelineConfig):
@@ -295,8 +278,6 @@ class SparkEngine(BaseEngine):
         self.spark.sql(log_ddl)
         print("Tabela de log de validação criada com sucesso.")
 
-    def read_table(self, table_name: str) -> DataFrame:
-        return self.spark.read.table(table_name)
 
     def read_table(self, table_name: str) -> DataFrame:
         """Lê uma tabela Delta e a retorna como um DataFrame."""
