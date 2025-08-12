@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.env
+.env
+venv/
+ENV/
+.envrc
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Testes
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Arquivos temporários
+*.tmp
+*.bak
+*.swp
+
+# Dados
+*.db
+*.sqlite3
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Outros
+backlog.txt

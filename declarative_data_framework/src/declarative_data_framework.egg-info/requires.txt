@@ -1,3 +1,0 @@
-pyyaml
-pyspark
-pydantic
