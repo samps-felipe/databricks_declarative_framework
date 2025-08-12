@@ -1,3 +1,14 @@
+Metadata-Version: 2.4
+Name: declarative-data-framework
+Version: 0.1.0
+Summary: A declarative framework for data pipelines.
+Author: Felipe Sampaio
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: pyyaml
+Requires-Dist: pyspark
+Requires-Dist: pydantic
+
 # Framework Declarativo para Pipelines de Dados no Databricks
 
 1. Visão Geral

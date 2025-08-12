@@ -1,0 +1,8 @@
+0. Faça uma análise detalhada de todo o código. Busque por mais otimizações (por exemplo remova arquivos desnecessários, divida arquivos se for extremamente necessário) e boas práticas de código e arquitetura.
+
+4. Poder escolher a engine de leitura, processamento, escrita (e validacao?)
+
+5. Transformar todos os comentario em ingles
+
+- Revisa estrutura das engines
+
