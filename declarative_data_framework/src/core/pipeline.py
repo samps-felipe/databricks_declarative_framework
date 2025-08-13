@@ -1,8 +1,7 @@
-from importlib import import_module
 from .engine import BaseEngine
 from ..models.pydantic_models import PipelineConfig
 from ..logger import get_logger
-from ..exceptions import StepExecutionError, PipelineError, ConfigurationError
+from ..exceptions import ConfigurationError
 
 logger = get_logger(__name__)
 
@@ -22,18 +21,9 @@ class Pipeline:
         self.engine.update_table(self.config)
         self.logger.info("Table update finished.")
 
-
     def run(self):
         self.logger.info(f"Starting pipeline run for: {self.config.pipeline_name}")
-        
-        df_source = None
-        if self.config.pipeline_type == 'silver':
-            df_source = self.engine.read(config=self.config)
-
-        df_transformed = self.engine.process(df_source, self.config)
-        df_transformed = self.engine.validate(df_transformed, self.config)
-        self.engine.write(df_transformed, self.config)
-
+        self.engine.run()
         self.logger.info("Pipeline run finished.")
 
     def test(self):

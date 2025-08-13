@@ -1,11 +1,12 @@
 from pyspark.sql import DataFrame
-from ....core.step import BaseStep
+from ....core.step import BaseStep, register_step
 from ....exceptions import ConfigurationError, StepExecutionError
 
+@register_step('read')
 class ReadStep(BaseStep):
     """Step responsible for reading data from the source."""
-    def execute(self) -> DataFrame:
-        self.logger.info("--- Step: Read ---")
+    def execute(self, df: DataFrame = None, **kwargs) -> DataFrame:
+        self.logger.info("--- Step: Read (Spark) ---")
 
         source_config = self.config.source
         pipeline_name = self.config.pipeline_name
@@ -16,23 +17,29 @@ class ReadStep(BaseStep):
             return None
 
         try:
-            # TODO: Implement logic to handle different source types (e.g., file, database)
-            # TODO: Deixar mais generico
             if not source_config:
-                raise ValueError("'source' configuration not found for a pipeline that requires file reading.")
+                raise ConfigurationError("'source' configuration not found for a pipeline that requires file reading.")
             
-            reader = self.engine.spark.read.format(source_config.format)
-            reader.options(**source_config.options)
+            reader = self.engine.spark.read
+            if source_config.format:
+                reader = reader.format(source_config.format)
+            if source_config.options:
+                reader.options(**source_config.options)
 
-            df = reader.load(source_config.path)
+            if source_config.path:
+                df = reader.load(source_config.path)
+            elif source_config.table:
+                df = reader.table(source_config.table)
+            elif source_config.query:
+                df = self.engine.spark.sql(source_config.query)
+            else:
+                raise ConfigurationError("Either 'path', 'table' or 'query' must be specified in the source configuration.")
             
         except Exception as e:
             self.logger.exception("Failure in READ step for pipeline '%s'", pipeline_name)
             raise StepExecutionError(f"Failure in READ step: {e}") from e
     
-                
-        # Validate column presence (to ensure the delimiter is correct)
-        if source_config and source_config.expected_columns:
+        if source_config.expected_columns:
             num_actual_columns = len(df.columns)
             if num_actual_columns != source_config.expected_columns:
                 delimiter = source_config.options.get('delimiter', '[NOT SPECIFIED]')
