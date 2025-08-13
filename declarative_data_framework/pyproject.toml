@@ -15,16 +15,17 @@ dependencies = [
 	"pyyaml",
 	"pyspark",
 	"pydantic",
-	"pandas"
+	"pandas",
+	"pytest",
+	"click",
+	"pyarrow"
 ]
 
 [project.scripts]
 declarative-data-framework = "declarative_data_framework.cli:cli"
 
-
 [tool.setuptools]
-package-dir = {"declarative_data_framework" = "src"}
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["declarative_data_framework*", "core*", "engines*", "models*", "quality*", "steps*"]

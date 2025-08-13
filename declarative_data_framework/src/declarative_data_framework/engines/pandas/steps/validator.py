@@ -1,7 +1,7 @@
 import pandas as pd
-from .....core.step import BaseStep, register_step
+from ....core.step import BaseStep, register_step
 from ..quality.rules import NotNullValidation, IsInValidation
-from .....exceptions import ValidationError
+from ....exceptions import ValidationError
 
 @register_step('validate')
 class ValidateStep(BaseStep):
@@ -21,6 +21,7 @@ class ValidateStep(BaseStep):
                             raise ValidationError(f"Validation failed for column '{column_spec.name}' with rule '{rule.rule}'.")
                         elif rule.on_fail == 'drop':
                             df = success_df
+                            self.logger.info(f"Dropped {len(failures_df)} rows from column '{column_spec.name}' due to validation rule '{rule.rule}'.")
                         elif rule.on_fail == 'warn':
                             self.logger.warning(f"Validation failed for column '{column_spec.name}' with rule '{rule.rule}'.")
         return df

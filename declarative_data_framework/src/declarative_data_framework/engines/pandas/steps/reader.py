@@ -1,6 +1,6 @@
 import pandas as pd
-from .....core.step import BaseStep, register_step
-from .....exceptions import ConfigurationError
+from ....core.step import BaseStep, register_step
+from ....exceptions import ConfigurationError
 
 @register_step('read')
 class ReadStep(BaseStep):

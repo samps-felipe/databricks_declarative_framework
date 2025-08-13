@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, validator, model_validator
 
 # Define reserved column names used by the framework
 RESERVED_COLUMN_NAMES = {
@@ -25,24 +25,27 @@ class ColumnSpec(BaseModel):
     format: Optional[str] = None
     try_cast: bool = False
 
-    @root_validator(pre=True)
+    from pydantic import model_validator
+
+    @model_validator(mode="before")
     def set_name_or_rename(cls, values):
         """Ensures that either 'name' or 'rename' is present."""
-        if values.get('name') is None and values.get('rename') is None:
+        # No modo 'before', values é um dict
+        name = values.get('name')
+        rename = values.get('rename')
+        if name is None and rename is None:
             raise ValueError("Each column must have either a 'name' or 'rename' field.")
-        
-        if values.get('name') is None:
-            values['name'] = values.get('rename')
-        elif values.get('rename') is None:
-            values['rename'] = values.get('name')
-
+        if name is None:
+            values['name'] = rename
+        elif rename is None:
+            values['rename'] = name
         return values
 
-    @root_validator(pre=False)
+    @model_validator(mode="after")
     def check_reserved_names(cls, values):
         """Validates that the final column name is not a reserved name."""
-        final_name = values.get('rename') or values.get('name')
-        if final_name.lower() in RESERVED_COLUMN_NAMES:
+        final_name = getattr(values, 'rename', None) or getattr(values, 'name', None)
+        if final_name and final_name.lower() in RESERVED_COLUMN_NAMES:
             raise ValueError(
                 f"The column name '{final_name}' is reserved by the framework. "
                 f"Reserved names are: {RESERVED_COLUMN_NAMES}"
@@ -128,18 +131,18 @@ class PipelineConfig(BaseModel):
     foreign_keys: List[ForeignKey] = []
     custom_transform_script: Optional[str] = None
 
-    @root_validator
+    @model_validator(mode="after")
     def validate_pipeline_type(cls, values):
         """Validates configuration based on the pipeline type."""
-        pipeline_type = values.get('pipeline_type')
+        pipeline_type = getattr(values, 'pipeline_type', None)
         if pipeline_type == 'silver':
-            if not values.get('source'):
+            if not getattr(values, 'source', None):
                 raise ValueError("'source' is required for silver pipelines.")
-            if not values.get('columns'):
+            if not getattr(values, 'columns', None):
                 raise ValueError("'columns' are required for silver pipelines.")
         elif pipeline_type == 'gold':
-            if not values.get('transformation'):
+            if not getattr(values, 'transformation', None):
                 raise ValueError("'transformation' is required for gold pipelines.")
-            if not values.get('dependencies'):
+            if not getattr(values, 'dependencies', None):
                 raise ValueError("'dependencies' are required for gold pipelines.")
         return values

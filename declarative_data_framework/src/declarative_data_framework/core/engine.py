@@ -45,27 +45,27 @@ class BaseEngine(ABC):
         """Applies schema or metadata changes to an existing table."""
         pass
 
-    @abstractmethod
-    def read(self):
-        """Reads data from the specified source."""
-        pass
+    # @abstractmethod
+    # def read(self):
+    #     """Reads data from the specified source."""
+    #     pass
 
-    @abstractmethod
-    def process(self, df):
-        """Processes the data using pipeline steps."""
-        pass
+    # @abstractmethod
+    # def process(self, df):
+    #     """Processes the data using pipeline steps."""
+    #     pass
 
-    @abstractmethod
-    def validate(self, df, validation_log_df=None):
-        """Applies data quality validations using the engine."""
-        pass
+    # @abstractmethod
+    # def validate(self, df, validation_log_df=None):
+    #     """Applies data quality validations using the engine."""
+    #     pass
 
-    @abstractmethod
-    def write(self, df):
-        """Writes the final DataFrame to the destination."""
-        pass
+    # @abstractmethod
+    # def write(self, df):
+    #     """Writes the final DataFrame to the destination."""
+    #     pass
     
-    @abstractmethod
-    def test(self):
-        """Runs the engine in test mode to validate configurations."""
-        pass
+    # @abstractmethod
+    # def test(self):
+    #     """Runs the engine in test mode to validate configurations."""
+    #     pass

@@ -1,5 +1,5 @@
 import pandas as pd
-from .....core.step import BaseStep, register_step
+from ....core.step import BaseStep, register_step
 
 @register_step('transform')
 class TransformStep(BaseStep):
