@@ -1,7 +1,7 @@
 import yaml
 from pyspark.sql import SparkSession
 from .core.pipeline import Pipeline
-from .engines.spark_engine import SparkEngine
+from .engines.spark.spark_engine import SparkEngine
 from .models.pydantic_models import PipelineConfig
 
 

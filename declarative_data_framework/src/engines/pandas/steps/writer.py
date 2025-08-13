@@ -1,0 +1,24 @@
+import pandas as pd
+from .....core.step import BaseStep, register_step
+from .....exceptions import ConfigurationError
+
+@register_step('write')
+class WriterStep(BaseStep):
+    """Step responsible for writing a pandas DataFrame to a destination."""
+    def execute(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
+        self.logger.info("--- Step: Write (Pandas) ---")
+
+        sink_config = self.config.sink
+        if not sink_config:
+            raise ConfigurationError("'sink' configuration not found.")
+
+        if sink_config.format == 'csv':
+            df.to_csv(sink_config.path, index=False)
+        elif sink_config.format == 'json':
+            df.to_json(sink_config.path, orient='records')
+        elif sink_config.format == 'parquet':
+            df.to_parquet(sink_config.path, index=False)
+        else:
+            raise NotImplementedError(f"Sink format '{sink_config.format}' is not supported by the pandas engine.")
+        
+        return df

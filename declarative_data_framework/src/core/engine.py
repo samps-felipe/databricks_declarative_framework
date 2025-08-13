@@ -1,6 +1,29 @@
 from abc import ABC, abstractmethod
-from pyspark.sql import DataFrame
+from typing import Dict, Type
 from ..models.pydantic_models import PipelineConfig
+
+# This will hold the mapping from engine name to engine class
+_engine_registry: Dict[str, Type] = {}
+
+def register_engine(name: str, cls: Type = None):
+    """
+    Registers or overwrites a engine class.
+    Usage as decorator: @register_engine('engine_name')
+    Usage as function: register_engine('engine_name', MyClass)
+    """
+    if cls is not None:
+        _engine_registry[name] = cls
+        return cls
+    
+    def decorator(inner_cls: Type) -> Type:
+        _engine_registry[name] = inner_cls
+        return inner_cls
+    
+    return decorator
+
+def get_engine(name: str) -> Type:
+    """Retrieves a engine from the registry."""
+    return _engine_registry.get(name)
 
 class BaseEngine(ABC):
     """
@@ -8,51 +31,41 @@ class BaseEngine(ABC):
     Qualquer novo engine (ex: PandasEngine) deve implementar estes métodos.
     """
     @abstractmethod
-    def read(self, config: PipelineConfig):
-        """Reads data from the specified source."""
+    def __init__(self, config: PipelineConfig):
+        """Initializes the engine with the given pipeline configuration."""
         pass
-
+    
     @abstractmethod
-    def process(self, df, config: PipelineConfig):
-        """Processes the data using pipeline steps."""
-        pass
-
-    @abstractmethod
-    def validate(self, df, config: PipelineConfig):
-        """Applies data quality validations using the engine."""
-        pass
-
-    @abstractmethod
-    def write(self, df, config: PipelineConfig, validation_log_df=None):
-        """Writes the final DataFrame to the destination."""
-        pass
-
-    @abstractmethod
-    def create_table(self, config: PipelineConfig):
+    def create_table(self):
         """Creates the table schema at the destination."""
         pass
 
     @abstractmethod
-    def update_table(self, config: PipelineConfig):
+    def update_table(self):
         """Applies schema or metadata changes to an existing table."""
         pass
 
     @abstractmethod
-    def read_table(self, table_name: str):
-        """Reads a complete table for testing purposes."""
+    def read(self):
+        """Reads data from the specified source."""
         pass
 
     @abstractmethod
-    def compare_dataframes(self, df_actual, df_expected) -> bool:
-        """Compares two DataFrames and returns True if they are identical."""
+    def process(self, df):
+        """Processes the data using pipeline steps."""
         pass
 
     @abstractmethod
-    def show_differences(self, df_actual, df_expected):
-        """Displays differences between two DataFrames."""
+    def validate(self, df, validation_log_df=None):
+        """Applies data quality validations using the engine."""
         pass
 
     @abstractmethod
-    def execute_gold_transformation(self, config: PipelineConfig):
-        """Executes transformation logic for a Gold pipeline."""
+    def write(self, df):
+        """Writes the final DataFrame to the destination."""
+        pass
+    
+    @abstractmethod
+    def test(self):
+        """Runs the engine in test mode to validate configurations."""
         pass

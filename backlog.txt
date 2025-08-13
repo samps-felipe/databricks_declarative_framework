@@ -6,3 +6,11 @@
 
 - Revisa estrutura das engines
 
+- Revisar steps
+
+- Possibilitar a sobrescrita de steps
+
+- Nos casos de engines que nao tem create pensar em alternativa de catalogo
+
+- Modulo de catalogacao
+

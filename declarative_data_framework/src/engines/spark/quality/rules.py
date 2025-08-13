@@ -1,32 +1,11 @@
-from abc import ABC, abstractmethod
 from pyspark.sql import DataFrame, functions as F
 from typing import Tuple
 import ast
-from .. import quality
-
-# --- Abstract Base Classes ---
-
-class BaseValidation(ABC):
-    """Base class for all column validations."""
-    def __init__(self, params: dict = None):
-        # Universal constructor for all rules
-        self.params = params or {}
-
-    @abstractmethod
-    def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
-        """Applies the validation rule."""
-        pass
-
-class BaseTableValidation(ABC):
-    """Base class for all table validations."""
-    @abstractmethod
-    def apply(self, df: DataFrame):
-        """Applies the validation rule to the entire table."""
-        pass
+from ..quality import BaseValidation, BaseTableValidation, register_rule
 
 # --- Column Validation Implementations ---
 
-@quality.register_rule("not_null")
+@register_rule("not_null")
 class NotNullValidation(BaseValidation):
     def apply(self, df: DataFrame, column_name: str) -> Tuple[DataFrame, DataFrame]:
         condition = F.col(column_name).isNotNull()
@@ -34,7 +13,7 @@ class NotNullValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
-@quality.register_rule("pattern")
+@register_rule("pattern")
 class PatternValidation(BaseValidation):
     def __init__(self, params: dict = None):
         super().__init__(params)
@@ -46,7 +25,7 @@ class PatternValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
-@quality.register_rule("isin")
+@register_rule("isin")
 class IsInValidation(BaseValidation):
     """Validates if the column value is in a list of allowed values."""
     def __init__(self, params: dict = None):
@@ -65,7 +44,7 @@ class IsInValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
-@quality.register_rule("greater_than_or_equal_to")
+@register_rule("greater_than_or_equal_to")
 class GreaterThanOrEqualToValidation(BaseValidation):
     """Validates if the column value is greater than or equal to a numeric value."""
     def __init__(self, params: dict = None):
@@ -82,7 +61,7 @@ class GreaterThanOrEqualToValidation(BaseValidation):
         success_df = df.filter(condition)
         return failures_df, success_df
 
-@quality.register_rule("isbetween")
+@register_rule("isbetween")
 class IsBetweenValidation(BaseValidation):
     """Validates if the column value is between a lower and upper bound."""
     def __init__(self, params: dict = None):
@@ -105,7 +84,7 @@ class IsBetweenValidation(BaseValidation):
 
 # --- Table Validation Implementations ---
 
-@quality.register_rule("duplicate_check")
+@register_rule("duplicate_check")
 class DuplicateCheckValidation(BaseTableValidation):
     def __init__(self, params: dict = None):
         self.columns = (params or {}).get('columns')
