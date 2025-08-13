@@ -14,11 +14,17 @@ requires-python = ">=3.8"
 dependencies = [
 	"pyyaml",
 	"pyspark",
-	"pydantic"
+	"pydantic",
+	"pandas"
 ]
 
+[project.scripts]
+declarative-data-framework = "declarative_data_framework.cli:cli"
+
+
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"declarative_data_framework" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["declarative_data_framework*", "core*", "engines*", "models*", "quality*", "steps*"]
